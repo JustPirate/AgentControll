@@ -176,29 +176,29 @@ Antigravity sessions. AgentControll does not own, install, or package `agy`.
 For Unix environments without Node.js or npm, install precompiled release binaries directly to `~/.local/bin` (or `/usr/local/bin` if run with root privileges):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/vijaygovindBiju/AgentControll/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/JustPirate/AgentControll/main/install.sh | sh
 ```
 
 You can customize the installation using environment variables:
 ```bash
 # Specify target directory
-curl -fsSL https://raw.githubusercontent.com/vijaygovindBiju/AgentControll/main/install.sh | BIN_DIR=/usr/local/bin sh
+curl -fsSL https://raw.githubusercontent.com/JustPirate/AgentControll/main/install.sh | BIN_DIR=/usr/local/bin sh
 
 # Install a specific release version
-curl -fsSL https://raw.githubusercontent.com/vijaygovindBiju/AgentControll/main/install.sh | AGENTCONTROL_VERSION=1.0.12 sh
+curl -fsSL https://raw.githubusercontent.com/JustPirate/AgentControll/main/install.sh | AGENTCONTROL_VERSION=1.0.12 sh
 ```
 
 ---
 
 ### Prebuilt Binaries (GitHub Releases)
 
-Download precompiled tarballs and checksums directly from [GitHub Releases](https://github.com/vijaygovindBiju/AgentControll/releases):
+Download precompiled tarballs and checksums directly from [GitHub Releases](https://github.com/JustPirate/AgentControll/releases):
 
 1. Download the archive and checksum for your platform:
    ```bash
 # Example: Linux x86_64
-curl -LO https://github.com/vijaygovindBiju/AgentControll/releases/download/v1.0.12/agentcontroll-v1.0.12-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/vijaygovindBiju/AgentControll/releases/download/v1.0.12/SHA256SUMS
+curl -LO https://github.com/JustPirate/AgentControll/releases/download/v1.0.12/agentcontroll-v1.0.12-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/JustPirate/AgentControll/releases/download/v1.0.12/SHA256SUMS
    ```
 
 2. Verify integrity:
@@ -223,7 +223,7 @@ Available release archives:
 Build directly from source using Cargo (Rust 1.75+ required):
 
 ```bash
-git clone https://github.com/vijaygovindBiju/AgentControll.git
+git clone https://github.com/JustPirate/AgentControll.git
 cd AgentControll
 cargo build --release --workspace
 cp target/release/{agentcontroll,agent-control,agentcontrold,ac} ~/.local/bin/
