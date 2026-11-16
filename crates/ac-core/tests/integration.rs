@@ -472,3 +472,164 @@ async fn recovery_replayed_removed_session_stays_removed() {
         );
     }
 }
+
+#[tokio::test]
+async fn test_resume_stopped_session() {
+    let store = EventStore::open_in_memory().unwrap();
+    let (mgr, mut rx) = make_manager(store);
+
+    let id = mgr
+        .create("resumable task".into(), "mock".into())
+        .await
+        .unwrap();
+    mgr.start(id.clone()).await.unwrap();
+
+    wait_for_event(&mut rx, |e| {
+        e.kind == EventKind::StateChanged && e.payload["to"].as_str() == Some("working")
+    })
+    .await;
+
+    // Stop session
+    mgr.stop(id.clone(), Some("paused by user".into()))
+        .await
+        .unwrap();
+    let session = mgr.get(id.clone()).await.unwrap().unwrap();
+    assert_eq!(session.state, SessionState::Stopped);
+    assert!(session.stopped_at.is_some());
+
+    // Resume stopped session
+    mgr.resume(id.clone()).await.unwrap();
+
+    // Verify events: RestartAttempted, Ready, RestartSucceeded, Resumed
+    wait_for_event(&mut rx, |e| {
+        e.kind == EventKind::SessionRestartAttempted && e.session_id == Some(id.clone())
+    })
+    .await;
+
+    wait_for_event(&mut rx, |e| {
+        e.kind == EventKind::SessionRestartSucceeded && e.session_id == Some(id.clone())
+    })
+    .await;
+
+    let resumed_session = mgr.get(id.clone()).await.unwrap().unwrap();
+    assert_eq!(resumed_session.state, SessionState::Working);
+    assert!(resumed_session.stopped_at.is_none());
+}
+
+#[tokio::test]
+async fn test_resume_crashed_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("recovery_resume.db");
+    let session_id: Id;
+
+    {
+        let store = EventStore::open(&db_path).unwrap();
+        let (mgr, mut rx) = make_manager(store);
+
+        session_id = mgr
+            .create("crashed task".into(), "mock".into())
+            .await
+            .unwrap();
+        mgr.start(session_id.clone()).await.unwrap();
+
+        wait_for_event(&mut rx, |e| {
+            e.kind == EventKind::StateChanged && e.payload["to"].as_str() == Some("working")
+        })
+        .await;
+    }
+
+    // Recover: orphaned session is now Crashed
+    {
+        let store = EventStore::open(&db_path).unwrap();
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let (event_tx, mut event_rx) = broadcast::channel::<AgentEvent>(256);
+
+        let mut manager = SessionManager::new(
+            store,
+            cmd_rx,
+            event_tx,
+            3,
+            Box::new(MockAdapterFactory::always(default_script())),
+        );
+        manager.recover_from_store().unwrap();
+        tokio::spawn(async move { manager.run().await });
+
+        let mgr = SessionManagerHandle::new(cmd_tx);
+        let s = mgr.get(session_id.clone()).await.unwrap().unwrap();
+        assert_eq!(s.state, SessionState::Crashed);
+
+        // Resume crashed session
+        mgr.resume(session_id.clone()).await.unwrap();
+
+        wait_for_event(&mut event_rx, |e| {
+            e.kind == EventKind::SessionRestartAttempted
+                && e.session_id == Some(session_id.clone())
+        })
+        .await;
+
+        wait_for_event(&mut event_rx, |e| {
+            e.kind == EventKind::SessionRestartSucceeded
+                && e.session_id == Some(session_id.clone())
+        })
+        .await;
+
+        let resumed = mgr.get(session_id.clone()).await.unwrap().unwrap();
+        assert_eq!(resumed.state, SessionState::Working);
+        assert_eq!(resumed.restart_count, 1);
+        assert!(resumed.stopped_at.is_none());
+    }
+}
+
+#[tokio::test]
+async fn test_resume_preserves_launch_and_workspace() {
+    let store = EventStore::open_in_memory().unwrap();
+    let (mgr, mut rx) = make_manager(store);
+
+    let launch = ac_core::agy_launch::AgyLaunchOptions {
+        model: Some("custom-model".into()),
+        working_dir: Some("/tmp".into()),
+        ..Default::default()
+    };
+
+    let id = mgr
+        .create_with_launch(
+            "configured task".into(),
+            "mock".into(),
+            None,
+            None,
+            Some(launch.clone()),
+        )
+        .await
+        .unwrap();
+
+    mgr.start(id.clone()).await.unwrap();
+    wait_for_event(&mut rx, |e| {
+        e.kind == EventKind::StateChanged && e.payload["to"].as_str() == Some("working")
+    })
+    .await;
+
+    mgr.stop(id.clone(), None).await.unwrap();
+    let stopped = mgr.get(id.clone()).await.unwrap().unwrap();
+    assert_eq!(stopped.state, SessionState::Stopped);
+    assert_eq!(
+        stopped.launch.as_ref().unwrap().model.as_deref(),
+        Some("custom-model")
+    );
+
+    mgr.resume(id.clone()).await.unwrap();
+    wait_for_event(&mut rx, |e| {
+        e.kind == EventKind::StateChanged && e.payload["to"].as_str() == Some("working")
+    })
+    .await;
+
+    let resumed = mgr.get(id.clone()).await.unwrap().unwrap();
+    assert_eq!(resumed.state, SessionState::Working);
+    assert_eq!(
+        resumed.launch.as_ref().unwrap().model.as_deref(),
+        Some("custom-model")
+    );
+    assert_eq!(
+        resumed.launch.as_ref().unwrap().working_dir.as_deref(),
+        Some("/tmp")
+    );
+}

@@ -514,3 +514,46 @@ async fn test_url_picker_modal_navigation_and_actions() {
     let (msg, _, _) = app.status_message.unwrap();
     assert!(msg.contains("https://github.com/agentcontrol"));
 }
+
+#[tokio::test]
+async fn test_space_key_rerun_switches_session_detail_id() {
+    let (sock, _tmp, _event_tx) =
+        setup_test_server(vec![ScriptedEvent::immediate(AdapterEvent::Ready)]).await;
+    let client = ApiClient::new(sock);
+
+    let mut app = App::new();
+    app.set_tab(Tab::Sessions);
+    refresh_data(&mut app, &client).await;
+
+    // Create session via client and start it
+    let sid = client
+        .create_session("task to rerun", "mock", None, None)
+        .await
+        .unwrap();
+    client.start_session(&sid).await.unwrap();
+
+    // Stop session
+    client.stop_session(&sid, None).await.unwrap();
+    refresh_data(&mut app, &client).await;
+
+    assert_eq!(app.sessions.len(), 1);
+    assert_eq!(app.sessions[0].state, SessionState::Stopped);
+    app.selected_session = 0;
+    app.session_detail_id = None;
+
+    // Press Space on stopped session to re-run
+    handle_key(&mut app, &client, make_key(KeyCode::Char(' ')))
+        .await
+        .unwrap();
+
+    // Verify session_detail_id is now updated to the newly started session
+    assert!(
+        app.session_detail_id.is_some(),
+        "session_detail_id must be updated on Space re-run"
+    );
+    assert_ne!(
+        app.session_detail_id.as_ref(),
+        Some(&sid),
+        "Must be a new session ID"
+    );
+}

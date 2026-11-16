@@ -3807,6 +3807,14 @@ async fn handle_session_resume_or_run(
                             StatusType::Success,
                         );
                         refresh_data(app, client).await;
+                        app.session_detail_id = Some(new_id.clone());
+                        load_session_history_if_needed(app, client, &new_id).await;
+                        if let Ok((cols, rows)) = crossterm::terminal::size() {
+                            let p_rows = rows.saturating_sub(2).max(1);
+                            let p_cols = cols.max(1);
+                            app.resize_session_terminals(p_rows, p_cols);
+                            let _ = client.resize_session(&new_id, p_rows, p_cols).await;
+                        }
                     }
                     Err(e) => app.set_status(
                         format!("Created session {} but failed to start: {e}", new_id.0),

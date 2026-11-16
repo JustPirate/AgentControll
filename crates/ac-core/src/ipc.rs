@@ -153,6 +153,7 @@ pub fn is_mutating_cmd(cmd: &str) -> bool {
         "session.create"
             | "session.start"
             | "session.create_and_start"
+            | "session.run"
             | "session.pause"
             | "session.resume"
             | "session.stop"
@@ -211,6 +212,40 @@ fn parse_launch(
         }
         launch = Some(l);
     }
+
+    let conv = params
+        .get("conversation_id")
+        .or_else(|| params.get("conversation"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    if let Some(cid) = conv {
+        let mut l = launch.unwrap_or_default();
+        if l.conversation_id.is_none() {
+            l.conversation_id = Some(cid.to_string());
+        }
+        launch = Some(l);
+    }
+
+    let cwd = params
+        .get("working_dir")
+        .or_else(|| params.get("working_directory"))
+        .or_else(|| params.get("cwd"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    if let Some(dir) = cwd {
+        let mut l = launch.unwrap_or_default();
+        if l.working_dir.is_none() {
+            l.working_dir = Some(dir.to_string());
+        }
+        launch = Some(l);
+    }
+
+    if let Some(ref l) = launch {
+        l.validate()?;
+    }
+
     Ok(launch)
 }
 
@@ -248,6 +283,18 @@ pub async fn dispatch_request(
     let family = req.cmd.split('.').next().unwrap_or("");
     match family {
         "session" => handle_session_cmd(req, session_mgr).await,
+        "conversation" => {
+            if req.cmd == "conversation.list" {
+                match crate::agy_discovery::discover_all_conversations(None, None) {
+                    Ok(conversations) => {
+                        ApiResponse::ok(&req.id, json!({ "conversations": conversations }))
+                    }
+                    Err(e) => ApiResponse::err(&req.id, "InternalError", e.to_string()),
+                }
+            } else {
+                ApiResponse::err(&req.id, "NotFound", format!("Unknown command: {}", req.cmd))
+            }
+        }
         "account" => handle_account_cmd(req, account_mgr, session_mgr).await,
         "project" => handle_project_cmd(req, project_registry).await,
         "interaction" => handle_interaction_cmd(req, session_mgr, interaction_hub).await,
@@ -421,7 +468,7 @@ pub async fn handle_session_cmd(req: &ApiRequest, mgr: &SessionManagerHandle) ->
                 Err(e) => ApiResponse::err(&req.id, "InvalidState", e.to_string()),
             }
         }
-        "session.create_and_start" => {
+        "session.create_and_start" | "session.run" => {
             let task = req.params["task_description"]
                 .as_str()
                 .unwrap_or("")
@@ -493,6 +540,14 @@ pub async fn handle_session_cmd(req: &ApiRequest, mgr: &SessionManagerHandle) ->
             Ok(sessions) => ApiResponse::ok(&req.id, json!({"sessions": sessions})),
             Err(e) => ApiResponse::err(&req.id, "InternalError", e.to_string()),
         },
+        "session.discover" => {
+            match crate::agy_discovery::discover_all_conversations(None, None) {
+                Ok(conversations) => {
+                    ApiResponse::ok(&req.id, json!({ "conversations": conversations }))
+                }
+                Err(e) => ApiResponse::err(&req.id, "InternalError", e.to_string()),
+            }
+        }
         "session.get" => {
             let sid = match get_id(&req.params, "session_id") {
                 Ok(id) => id,

@@ -20,6 +20,8 @@ pub fn key_event_to_string(key: &KeyEvent) -> String {
                 c.to_ascii_uppercase().to_string()
             } else if c.is_ascii_alphabetic() && !parts.is_empty() {
                 c.to_ascii_uppercase().to_string()
+            } else if c == ' ' {
+                "Space".to_string()
             } else {
                 c.to_string()
             }
@@ -96,6 +98,7 @@ pub fn matches_key(key: &KeyEvent, spec: &str) -> bool {
     }
 
     match key_token.to_lowercase().as_str() {
+        "space" => key.code == KeyCode::Char(' '),
         "esc" | "escape" => key.code == KeyCode::Esc,
         "enter" | "return" => key.code == KeyCode::Enter,
         "tab" => key.code == KeyCode::Tab,

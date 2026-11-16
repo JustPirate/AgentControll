@@ -23,8 +23,9 @@ pub const FIELD_DIR: usize = 1;
 pub const FIELD_EXEC_MODE: usize = 2;
 pub const FIELD_PERM_MODE: usize = 3;
 pub const FIELD_MODEL: usize = 4;
-pub const FIELD_BUTTONS: usize = 5;
-pub const FIELDS_COUNT: usize = 6;
+pub const FIELD_CONV_ID: usize = 5;
+pub const FIELD_BUTTONS: usize = 6;
+pub const FIELDS_COUNT: usize = 7;
 
 /// Open completion popup for the working-directory field.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -64,6 +65,8 @@ pub struct StartSessionForm {
     pub perm_mode_index: usize,
     /// 0 = agy default, otherwise index + 1 into the account's model list.
     pub model_index: usize,
+    /// Optional conversation ID to resume.
+    pub conversation_input: String,
     /// 0 = Start, 1 = Cancel.
     pub button: usize,
     /// Dangerous-mode confirmation is showing; value is the focused button (0 = Cancel, 1 = Continue).
@@ -104,6 +107,7 @@ impl StartSessionForm {
             },
             perm_mode_index: 0,
             model_index: 0,
+            conversation_input: String::new(),
             button: 0,
             confirm_dangerous: None,
             error: None,
@@ -587,7 +591,9 @@ pub async fn handle_key(
             request_listing(app, &mut form, true);
         }
         KeyCode::Tab => form.field = cycle(form.field, FIELDS_COUNT, true),
-        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ') if form.field != FIELD_DIR => {
+        KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
+            if form.field != FIELD_DIR && form.field != FIELD_CONV_ID =>
+        {
             let fwd = key.code != KeyCode::Left;
             match form.field {
                 FIELD_ACCOUNT => {
@@ -616,13 +622,25 @@ pub async fn handle_key(
             form.dir_input.pop();
             after_dir_edit(app, &mut form);
         }
+        KeyCode::Backspace if form.field == FIELD_CONV_ID => {
+            form.conversation_input.pop();
+            form.error = None;
+        }
         KeyCode::Delete if form.field == FIELD_DIR => {
             form.dir_input.pop();
             after_dir_edit(app, &mut form);
         }
+        KeyCode::Delete if form.field == FIELD_CONV_ID => {
+            form.conversation_input.pop();
+            form.error = None;
+        }
         KeyCode::Char(c) if form.field == FIELD_DIR => {
             form.dir_input.push(c);
             after_dir_edit(app, &mut form);
+        }
+        KeyCode::Char(c) if form.field == FIELD_CONV_ID => {
+            form.conversation_input.push(c);
+            form.error = None;
         }
         KeyCode::Enter => match form.field {
             FIELD_ACCOUNT if form.account_index >= n_accounts => {
@@ -648,11 +666,23 @@ pub async fn handle_key(
     app.active_modal = Some(Modal::StartSession(form));
 }
 
+fn validate_conversation_id(form: &StartSessionForm) -> Result<(), String> {
+    let conv = form.conversation_input.trim();
+    if !conv.is_empty() && !ac_core::agy_launch::is_valid_conversation_id(conv) {
+        return Err(format!("Invalid conversation ID: {conv}"));
+    }
+    Ok(())
+}
+
 async fn try_start(app: &mut App, client: &ApiClient, mut form: Box<StartSessionForm>) {
     form.error = if form.account_index >= agy_accounts(app).len() {
         Some("Select an Antigravity account (or add one first).".into())
+    } else if let Err(e) = validate_dir(&form) {
+        Some(e)
+    } else if let Err(e) = validate_conversation_id(&form) {
+        Some(e)
     } else {
-        validate_dir(&form).err()
+        None
     };
     if form.error.is_none() && form.perm_mode().is_dangerous() {
         form.confirm_dangerous = Some(0); // Default to Cancel (0)
@@ -672,13 +702,22 @@ pub fn launch_options(app: &App, form: &StartSessionForm) -> Result<AgyLaunchOpt
         Ok((cols, rows)) => (Some(cols.max(1)), Some(rows.saturating_sub(2).max(1))),
         Err(_) => (None, None),
     };
+    let trimmed_conv = form.conversation_input.trim();
+    let conversation_id = if trimmed_conv.is_empty() {
+        None
+    } else {
+        if !ac_core::agy_launch::is_valid_conversation_id(trimmed_conv) {
+            return Err(format!("Invalid conversation ID: {trimmed_conv}"));
+        }
+        Some(trimmed_conv.to_string())
+    };
     Ok(AgyLaunchOptions {
         execution_mode: form.exec_mode(),
         permission_mode: form.perm_mode(),
         sandbox: false,
         model: models.get(form.model_index).and_then(|(id, _)| id.clone()),
         working_dir: Some(dir.display().to_string()),
-        conversation_id: None,
+        conversation_id,
         initial_rows,
         initial_cols,
     })
@@ -712,6 +751,10 @@ pub fn handle_paste(app: &mut App, mut form: Box<StartSessionForm>, text: &str) 
         let cleaned: String = text.chars().filter(|c| *c != '\r' && *c != '\n').collect();
         form.dir_input.push_str(&cleaned);
         after_dir_edit(app, &mut form);
+    } else if form.field == FIELD_CONV_ID {
+        let cleaned: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+        form.conversation_input.push_str(&cleaned);
+        form.error = None;
     }
     app.active_modal = Some(Modal::StartSession(form));
 }

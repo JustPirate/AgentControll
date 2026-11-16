@@ -11,8 +11,8 @@ use ratatui::{
 use crate::{
     app::App,
     launch::{
-        self, split_input, StartSessionForm, FIELD_ACCOUNT, FIELD_BUTTONS, FIELD_DIR,
-        FIELD_EXEC_MODE, FIELD_MODEL, FIELD_PERM_MODE,
+        self, split_input, StartSessionForm, FIELD_ACCOUNT, FIELD_BUTTONS, FIELD_CONV_ID,
+        FIELD_DIR, FIELD_EXEC_MODE, FIELD_MODEL, FIELD_PERM_MODE,
     },
 };
 
@@ -26,7 +26,7 @@ pub fn render(f: &mut Frame, app: &App, form: &StartSessionForm) {
     if f.area().width == 0 || f.area().height == 0 {
         return;
     }
-    let area = centered(74, 28, f.area());
+    let area = centered(74, 31, f.area());
     f.render_widget(Clear, area);
     let dim = Style::default().fg(Color::DarkGray);
     let label = |i: usize, t: &'static str| {
@@ -63,7 +63,7 @@ pub fn render(f: &mut Frame, app: &App, form: &StartSessionForm) {
                 },
             ),
             Span::styled(
-                if focused && i != FIELD_DIR {
+                if focused && i != FIELD_DIR && i != FIELD_CONV_ID {
                     "   ←/→"
                 } else {
                     ""
@@ -183,6 +183,26 @@ pub fn render(f: &mut Frame, app: &App, form: &StartSessionForm) {
     if let Some(s) = model_status {
         lines.push(Line::from(Span::styled(format!("   {s}"), dim)));
     }
+    lines.push(Line::from(""));
+
+    // Resume Conversation ID (Optional)
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        label(FIELD_CONV_ID, "Resume Conversation ID"),
+        Span::styled(" (optional)", dim),
+    ]));
+    let conv_display = if form.conversation_input.is_empty() && form.field != FIELD_CONV_ID {
+        "(none - start new)".to_string()
+    } else {
+        form.conversation_input.clone()
+    };
+    let mut conv_line = value(FIELD_CONV_ID, conv_display);
+    if form.field == FIELD_CONV_ID {
+        conv_line
+            .spans
+            .push(Span::styled("█", Style::default().fg(Color::Cyan)));
+    }
+    lines.push(conv_line);
     lines.push(Line::from(""));
 
     if let Some(e) = &form.error {

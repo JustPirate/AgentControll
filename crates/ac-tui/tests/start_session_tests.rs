@@ -15,8 +15,8 @@ use ac_tui::{
     client::ApiClient,
     event::{handle_key, poll_agy_login},
     launch::{
-        self, StartSessionForm, FIELD_BUTTONS, FIELD_DIR, FIELD_EXEC_MODE, FIELD_MODEL,
-        FIELD_PERM_MODE,
+        self, StartSessionForm, FIELD_BUTTONS, FIELD_CONV_ID, FIELD_DIR, FIELD_EXEC_MODE,
+        FIELD_MODEL, FIELD_PERM_MODE,
     },
     ui,
 };
@@ -615,4 +615,82 @@ async fn login_link_screen_displays_phone_portal_and_toggles_qr_code() {
 
     // Clean up
     keys(&mut app, &client, &[KeyCode::Esc]).await;
+}
+
+#[tokio::test]
+async fn test_resume_conversation_id_field_typing_and_editing() {
+    let t = tree();
+    let (mut app, client, _) = setup(t.path());
+
+    form_mut(&mut app).field = FIELD_CONV_ID;
+    assert_eq!(form(&app).conversation_input, "");
+
+    // Type valid conversation ID
+    type_str(&mut app, &client, "conv-abc-123").await;
+    assert_eq!(form(&app).conversation_input, "conv-abc-123");
+
+    // Backspace removes last char
+    keys(&mut app, &client, &[KeyCode::Backspace]).await;
+    assert_eq!(form(&app).conversation_input, "conv-abc-12");
+
+    // Delete removes last char
+    keys(&mut app, &client, &[KeyCode::Delete]).await;
+    assert_eq!(form(&app).conversation_input, "conv-abc-1");
+
+    // Render should show the label and the typed value
+    let screen = render(&app);
+    assert!(screen.contains("Resume Conversation ID"), "{screen}");
+    assert!(screen.contains("conv-abc-1"), "{screen}");
+}
+
+#[tokio::test]
+async fn test_resume_conversation_id_validation_error() {
+    let t = tree();
+    let (mut app, client, _) = setup(t.path());
+
+    // Enter invalid conversation ID (starts with dash)
+    form_mut(&mut app).field = FIELD_CONV_ID;
+    type_str(&mut app, &client, "-invalid-id").await;
+
+    // Focus Start button
+    form_mut(&mut app).field = FIELD_BUTTONS;
+    form_mut(&mut app).button = 0;
+
+    // Press Enter to submit
+    keys(&mut app, &client, &[KeyCode::Enter]).await;
+
+    let error = form(&app).error.as_ref().expect("Should have validation error");
+    assert!(
+        error.contains("Invalid conversation ID"),
+        "Expected invalid conversation error, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_resume_conversation_id_in_launch_options() {
+    let t = tree();
+    let (mut app, _, _) = setup(t.path());
+
+    // Initially empty -> conversation_id is None
+    let opts = launch::launch_options(&app, form(&app)).unwrap();
+    assert_eq!(opts.conversation_id, None);
+
+    // When valid conversation ID is populated -> conversation_id is Some(...)
+    form_mut(&mut app).conversation_input = "valid-conv-id-123".into();
+    let opts = launch::launch_options(&app, form(&app)).unwrap();
+    assert_eq!(opts.conversation_id, Some("valid-conv-id-123".into()));
+}
+
+#[tokio::test]
+async fn test_resume_conversation_id_paste() {
+    let t = tree();
+    let (mut app, _, _) = setup(t.path());
+
+    form_mut(&mut app).field = FIELD_CONV_ID;
+    let form_box = match app.active_modal.take() {
+        Some(Modal::StartSession(f)) => f,
+        _ => unreachable!(),
+    };
+    launch::handle_paste(&mut app, form_box, "  conv-pasted-999 \t\n");
+    assert_eq!(form(&app).conversation_input, "conv-pasted-999");
 }

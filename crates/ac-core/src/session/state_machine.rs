@@ -64,7 +64,10 @@ pub fn is_valid_transition(from: &SessionState, to: &SessionState) -> bool {
         | (WaitingForHuman, Crashed)
         | (Paused, Crashed)
         | (Starting, Crashed)
-        // Restart cycle
+        // Resumption / restart cycle
+        | (Stopped, Starting)
+        | (Crashed, Starting)
+        | (Stopped, Restarting)
         | (Crashed, Restarting)
         | (Restarting, Starting)
         | (Crashed, Failed) // restart limit exceeded
@@ -85,10 +88,15 @@ pub fn apply(session: &mut AgentSession, to: SessionState) -> TransitionResult {
         if to == SessionState::Working && session.started_at.is_none() {
             session.started_at = Some(now);
         }
+        if to == SessionState::Starting || to == SessionState::Restarting {
+            session.stopped_at = None;
+        }
         if to.is_terminal() {
             session.stopped_at = Some(now);
         }
-        if to == SessionState::Restarting {
+        if to == SessionState::Restarting
+            || (from == SessionState::Crashed && to == SessionState::Starting)
+        {
             session.restart_count += 1;
         }
 
@@ -273,6 +281,9 @@ mod tests {
             (Paused, Crashed),
             (Starting, Crashed),
             (Crashed, Restarting),
+            (Stopped, Starting),
+            (Crashed, Starting),
+            (Stopped, Restarting),
             (Restarting, Starting),
             (Crashed, Failed),
         ];
@@ -282,5 +293,37 @@ mod tests {
                 "Expected {from:?} → {to:?} to be valid"
             );
         }
+    }
+
+    #[test]
+    fn stopped_to_starting_is_valid_and_clears_stopped_at() {
+        let mut s = session();
+        apply(&mut s, SessionState::Starting);
+        apply(&mut s, SessionState::Working);
+        apply(&mut s, SessionState::Stopping);
+        apply(&mut s, SessionState::Stopped);
+        assert_eq!(s.state, SessionState::Stopped);
+        assert!(s.stopped_at.is_some());
+
+        let r = apply(&mut s, SessionState::Starting);
+        assert!(matches!(r, TransitionResult::Changed { .. }));
+        assert_eq!(s.state, SessionState::Starting);
+        assert!(s.stopped_at.is_none());
+    }
+
+    #[test]
+    fn crashed_to_starting_is_valid_and_increments_restart_count() {
+        let mut s = session();
+        apply(&mut s, SessionState::Starting);
+        apply(&mut s, SessionState::Working);
+        apply(&mut s, SessionState::Crashed);
+        assert_eq!(s.state, SessionState::Crashed);
+        let prev_restarts = s.restart_count;
+
+        let r = apply(&mut s, SessionState::Starting);
+        assert!(matches!(r, TransitionResult::Changed { .. }));
+        assert_eq!(s.state, SessionState::Starting);
+        assert_eq!(s.restart_count, prev_restarts + 1);
+        assert!(s.stopped_at.is_none());
     }
 }

@@ -50,6 +50,9 @@ enum Commands {
     /// Session management commands.
     #[command(subcommand)]
     Session(SessionCmd),
+    /// Conversation inspection and discovery commands.
+    #[command(subcommand)]
+    Conversation(ConversationCmd),
     /// Account management commands.
     #[command(subcommand)]
     Account(AccountCmd),
@@ -94,6 +97,13 @@ enum Commands {
     },
 }
 
+/// Conversation inspection and discovery subcommands.
+#[derive(Subcommand)]
+enum ConversationCmd {
+    /// List discovered conversations from host storage and account profiles.
+    List,
+}
+
 #[derive(Subcommand)]
 enum SessionCmd {
     /// Create a new session (without starting it).
@@ -110,6 +120,9 @@ enum SessionCmd {
         /// Optional explicit account ID.
         #[arg(long)]
         account_id: Option<String>,
+        /// Optional conversation ID to resume.
+        #[arg(short = 'c', long = "conversation")]
+        conversation: Option<String>,
     },
     /// Start a session (transition Idle → Starting → Working).
     Start {
@@ -130,13 +143,16 @@ enum SessionCmd {
         /// Optional explicit account ID.
         #[arg(long)]
         account_id: Option<String>,
+        /// Optional conversation ID to resume.
+        #[arg(short = 'c', long = "conversation")]
+        conversation: Option<String>,
     },
     /// Pause a running session.
     Pause {
         /// Session ID.
         session_id: String,
     },
-    /// Resume a paused session.
+    /// Resume a paused session (or restart a stopped/crashed session).
     Resume {
         /// Session ID.
         session_id: String,
@@ -155,6 +171,8 @@ enum SessionCmd {
         /// Session ID.
         session_id: String,
     },
+    /// Discover existing Antigravity conversations across host and account profiles.
+    Discover,
     /// List all sessions.
     List,
     /// Get details for a specific session.
@@ -622,15 +640,19 @@ fn build_request(commands: &Commands) -> Result<(String, serde_json::Value)> {
                 agent_type,
                 project_id,
                 account_id,
-            } => (
-                "session.create".to_owned(),
-                json!({
-                    "task_description": task,
-                    "agent_type": agent_type,
-                    "project_id": project_id,
-                    "account_id": account_id,
-                }),
-            ),
+                conversation,
+            } => {
+                let mut map = serde_json::Map::new();
+                map.insert("task_description".into(), json!(task));
+                map.insert("agent_type".into(), json!(agent_type));
+                map.insert("project_id".into(), json!(project_id));
+                map.insert("account_id".into(), json!(account_id));
+                if let Some(cid) = conversation {
+                    map.insert("conversation_id".into(), json!(cid));
+                    map.insert("launch".into(), json!({ "conversation_id": cid }));
+                }
+                ("session.create".to_owned(), serde_json::Value::Object(map))
+            }
             SessionCmd::Start { session_id } => (
                 "session.start".to_owned(),
                 json!({ "session_id": session_id }),
@@ -640,15 +662,22 @@ fn build_request(commands: &Commands) -> Result<(String, serde_json::Value)> {
                 agent_type,
                 project_id,
                 account_id,
-            } => (
-                "session.create_and_start".to_owned(),
-                json!({
-                    "task_description": task,
-                    "agent_type": agent_type,
-                    "project_id": project_id,
-                    "account_id": account_id,
-                }),
-            ),
+                conversation,
+            } => {
+                let mut map = serde_json::Map::new();
+                map.insert("task_description".into(), json!(task));
+                map.insert("agent_type".into(), json!(agent_type));
+                map.insert("project_id".into(), json!(project_id));
+                map.insert("account_id".into(), json!(account_id));
+                if let Some(cid) = conversation {
+                    map.insert("conversation_id".into(), json!(cid));
+                    map.insert("launch".into(), json!({ "conversation_id": cid }));
+                }
+                (
+                    "session.create_and_start".to_owned(),
+                    serde_json::Value::Object(map),
+                )
+            }
             SessionCmd::Pause { session_id } => (
                 "session.pause".to_owned(),
                 json!({ "session_id": session_id }),
@@ -665,6 +694,7 @@ fn build_request(commands: &Commands) -> Result<(String, serde_json::Value)> {
                 "session.remove".to_owned(),
                 json!({ "session_id": session_id }),
             ),
+            SessionCmd::Discover => ("session.discover".to_owned(), json!({})),
             SessionCmd::List => ("session.list".to_owned(), json!({})),
             SessionCmd::Get { session_id } => (
                 "session.get".to_owned(),
@@ -702,6 +732,10 @@ fn build_request(commands: &Commands) -> Result<(String, serde_json::Value)> {
                 "session.handoff".to_owned(),
                 json!({ "session_id": session_id, "target_account_id": account_id }),
             ),
+        },
+
+        Commands::Conversation(c) => match c {
+            ConversationCmd::List => ("conversation.list".to_owned(), json!({})),
         },
 
         Commands::Account(a) => match a {
@@ -1039,6 +1073,60 @@ fn print_response(resp: &ApiResponse, plain: bool) {
                         s["state"].as_str().unwrap_or("?"),
                         agent_str,
                         s["task_description"].as_str().unwrap_or("?"),
+                    );
+                }
+                return;
+            }
+            // Conversations list
+            if let Some(conversations) = result.get("conversations").and_then(|c| c.as_array()) {
+                if conversations.is_empty() {
+                    if !plain {
+                        println!("No conversations found.");
+                    }
+                    return;
+                }
+                if plain {
+                    for c in conversations {
+                        let is_ext = c["is_external"].as_bool().unwrap_or(false);
+                        let source = if is_ext {
+                            "external".to_string()
+                        } else if let Some(aid) = c["account_id"].as_str() {
+                            format!("profile ({aid})")
+                        } else {
+                            "profile".to_string()
+                        };
+                        println!(
+                            "{}\t{}\t{}\t{}\t{}",
+                            c["conversation_id"].as_str().unwrap_or("?"),
+                            source,
+                            c["step_count"].as_u64().unwrap_or(0),
+                            c["last_modified_time"].as_str().unwrap_or("?"),
+                            c["title"].as_str().unwrap_or("?"),
+                        );
+                    }
+                    return;
+                }
+                println!(
+                    "{:<38}  {:<24}  {:<6}  {:<22}  {}",
+                    "CONVERSATION ID", "SOURCE", "STEPS", "LAST MODIFIED", "TITLE"
+                );
+                println!("{}", "-".repeat(110));
+                for c in conversations {
+                    let is_ext = c["is_external"].as_bool().unwrap_or(false);
+                    let source = if is_ext {
+                        "external".to_string()
+                    } else if let Some(aid) = c["account_id"].as_str() {
+                        format!("profile ({aid})")
+                    } else {
+                        "profile".to_string()
+                    };
+                    println!(
+                        "{:<38}  {:<24}  {:<6}  {:<22}  {}",
+                        c["conversation_id"].as_str().unwrap_or("?"),
+                        source,
+                        c["step_count"].as_u64().unwrap_or(0),
+                        c["last_modified_time"].as_str().unwrap_or("?"),
+                        c["title"].as_str().unwrap_or("?"),
                     );
                 }
                 return;

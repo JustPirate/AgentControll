@@ -287,7 +287,7 @@ impl DaemonClient {
         Ok(())
     }
 
-    /// Resume a paused session.
+    /// Resume a paused session (or restart a stopped/crashed session).
     pub async fn resume_session(&self, session_id: &Id) -> Result<()> {
         let resp = self
             .send_command("session.resume", json!({ "session_id": session_id }))
@@ -300,6 +300,26 @@ impl DaemonClient {
             anyhow::bail!("Failed to resume session: {msg}");
         }
         Ok(())
+    }
+
+    /// Discover conversations across host storage and account profiles.
+    pub async fn list_conversations(
+        &self,
+    ) -> Result<Vec<ac_core::agy_discovery::DiscoveredConversation>> {
+        let resp = self.send_command("conversation.list", json!({})).await?;
+        if !resp.ok {
+            let msg = resp
+                .error
+                .map(|e| e.message)
+                .unwrap_or_else(|| "Unknown error".into());
+            anyhow::bail!("Failed to list conversations: {msg}");
+        }
+        let list = resp
+            .result
+            .and_then(|r| r.get("conversations").cloned())
+            .unwrap_or_else(|| json!([]));
+        let convs = serde_json::from_value(list)?;
+        Ok(convs)
     }
 
     /// Stop a session.

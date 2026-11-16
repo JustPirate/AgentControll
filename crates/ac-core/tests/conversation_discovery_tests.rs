@@ -18,7 +18,10 @@ use std::{
 };
 
 use ac_core::{
-    adapter::CompositeAdapterFactory,
+    adapter::{
+        mock::{default_script, MockAdapterFactory},
+        CompositeAdapterFactory,
+    },
     agy_discovery::{
         discover_all_conversations, discover_external_conversations,
         discover_profile_conversations, find_conversation_file, link_conversation_to_profile,
@@ -26,12 +29,14 @@ use ac_core::{
     },
     agy_launch::AgyLaunchOptions,
     event_store::EventStore,
+    ipc::dispatch_request,
     session::{
         manager::{SessionManager, SessionManagerHandle},
         state_machine,
     },
-    types::{AgentSession, Id, SessionState},
+    types::{AgentSession, ApiRequest, Id, SessionState},
 };
+use serde_json::json;
 use rusqlite::Connection;
 use tempfile::TempDir;
 
@@ -607,4 +612,176 @@ fn test_13_corrupted_conversation_skipped_during_discovery() {
         0,
         "Corrupted trajectory file must be skipped during discovery"
     );
+}
+
+fn create_mock_manager(store: EventStore) -> SessionManagerHandle {
+    let (cmd_tx, cmd_rx) = tokio::sync::mpsc::channel(64);
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(128);
+    let factory = Box::new(MockAdapterFactory::always(default_script()));
+    let manager = SessionManager::new(store, cmd_rx, event_tx, 3, factory);
+
+    tokio::spawn(async move {
+        manager.run().await;
+    });
+
+    SessionManagerHandle::new(cmd_tx)
+}
+
+#[tokio::test]
+async fn test_14_ipc_dispatch_conversation_list_and_session_discover() {
+    let store = EventStore::open_in_memory().unwrap();
+    let mgr = create_mock_manager(store);
+
+    let req_conv = ApiRequest {
+        v: 1,
+        id: "req-1".into(),
+        cmd: "conversation.list".into(),
+        params: json!({}),
+    };
+    let resp_conv = dispatch_request(&req_conv, &mgr, &None, &None, &None, &None, None).await;
+    assert!(resp_conv.ok);
+    assert!(resp_conv.result.unwrap().get("conversations").is_some());
+
+    let req_disc = ApiRequest {
+        v: 1,
+        id: "req-2".into(),
+        cmd: "session.discover".into(),
+        params: json!({}),
+    };
+    let resp_disc = dispatch_request(&req_disc, &mgr, &None, &None, &None, &None, None).await;
+    assert!(resp_disc.ok);
+    assert!(resp_disc.result.unwrap().get("conversations").is_some());
+}
+
+#[tokio::test]
+async fn test_15_ipc_session_run_alias_and_top_level_conversation() {
+    let store = EventStore::open_in_memory().unwrap();
+    let mgr = create_mock_manager(store);
+
+    // Create session using top-level conversation_id (without starting)
+    let req_create = ApiRequest {
+        v: 1,
+        id: "req-create".into(),
+        cmd: "session.create".into(),
+        params: json!({
+            "task_description": "test task",
+            "agent_type": "mock",
+            "conversation_id": "test-conv-1234",
+            "working_dir": "/tmp"
+        }),
+    };
+    let resp_create = dispatch_request(&req_create, &mgr, &None, &None, &None, &None, None).await;
+    assert!(resp_create.ok, "Expected ok response, got: {:?}", resp_create);
+    let session_id = resp_create.result.unwrap()["session_id"].as_str().unwrap().to_string();
+
+    let session = mgr.get(Id(session_id.clone())).await.unwrap().unwrap();
+    assert_eq!(
+        session.launch.as_ref().and_then(|l| l.conversation_id.as_deref()),
+        Some("test-conv-1234")
+    );
+    assert_eq!(
+        session.launch.as_ref().and_then(|l| l.working_dir.as_deref()),
+        Some("/tmp")
+    );
+
+    // Verify session.run rejects non-existent conversation
+    let req_run_missing = ApiRequest {
+        v: 1,
+        id: "req-run-missing".into(),
+        cmd: "session.run".into(),
+        params: json!({
+            "task_description": "missing conv task",
+            "agent_type": "mock",
+            "conversation": "non-existent-conv-id",
+            "cwd": "/tmp"
+        }),
+    };
+    let resp_run_missing =
+        dispatch_request(&req_run_missing, &mgr, &None, &None, &None, &None, None).await;
+    assert!(!resp_run_missing.ok);
+    assert!(resp_run_missing
+        .error
+        .unwrap()
+        .message
+        .contains("Cannot resume conversation"));
+
+    // Prepare valid conversation file in host storage for valid run
+    let conv_id = "test-conv-5678";
+    let conv_path = ac_core::agy_discovery::default_host_gemini_dir()
+        .join("antigravity-cli")
+        .join("conversations")
+        .join(format!("{conv_id}.db"));
+    create_valid_conv_db(&conv_path);
+
+    // Run session using session.run alias with valid conversation
+    let req_run = ApiRequest {
+        v: 1,
+        id: "req-run".into(),
+        cmd: "session.run".into(),
+        params: json!({
+            "task_description": "running task",
+            "agent_type": "mock",
+            "conversation": conv_id,
+            "cwd": "/tmp"
+        }),
+    };
+    let resp_run = dispatch_request(&req_run, &mgr, &None, &None, &None, &None, None).await;
+    assert!(resp_run.ok, "Expected ok response, got: {:?}", resp_run);
+    let run_session_id = resp_run.result.unwrap()["session_id"].as_str().unwrap().to_string();
+
+    let run_session = mgr.get(Id(run_session_id.clone())).await.unwrap().unwrap();
+    assert_eq!(
+        run_session.launch.as_ref().and_then(|l| l.conversation_id.as_deref()),
+        Some(conv_id)
+    );
+    assert_eq!(run_session.state, SessionState::Working);
+
+    // Clean up created test db
+    let _ = fs::remove_file(conv_path);
+}
+
+#[tokio::test]
+async fn test_16_ipc_session_resume_stopped_session() {
+    let store = EventStore::open_in_memory().unwrap();
+    let mgr = create_mock_manager(store);
+
+    // Create and start
+    let req_run = ApiRequest {
+        v: 1,
+        id: "req-run".into(),
+        cmd: "session.run".into(),
+        params: json!({
+            "task_description": "resumable session",
+            "agent_type": "mock"
+        }),
+    };
+    let resp_run = dispatch_request(&req_run, &mgr, &None, &None, &None, &None, None).await;
+    assert!(resp_run.ok);
+    let sid = resp_run.result.unwrap()["session_id"].as_str().unwrap().to_string();
+
+    // Stop
+    let req_stop = ApiRequest {
+        v: 1,
+        id: "req-stop".into(),
+        cmd: "session.stop".into(),
+        params: json!({ "session_id": sid }),
+    };
+    let resp_stop = dispatch_request(&req_stop, &mgr, &None, &None, &None, &None, None).await;
+    assert!(resp_stop.ok);
+
+    let session = mgr.get(Id(sid.clone())).await.unwrap().unwrap();
+    assert_eq!(session.state, SessionState::Stopped);
+
+    // Resume via session.resume IPC
+    let req_resume = ApiRequest {
+        v: 1,
+        id: "req-resume".into(),
+        cmd: "session.resume".into(),
+        params: json!({ "session_id": sid }),
+    };
+    let resp_resume = dispatch_request(&req_resume, &mgr, &None, &None, &None, &None, None).await;
+    assert!(resp_resume.ok, "Expected ok response, got: {:?}", resp_resume);
+
+    let resumed_session = mgr.get(Id(sid)).await.unwrap().unwrap();
+    assert_eq!(resumed_session.state, SessionState::Working);
 }

@@ -647,6 +647,14 @@ impl SessionManager {
                 );
             }
         }
+        self.spawn_adapter(session_id, false).await
+    }
+
+    async fn spawn_adapter(&mut self, session_id: Id, is_restart: bool) -> Result<()> {
+        // Clean up any stale adapter handle if present
+        if let Some(mut live) = self.adapters.remove(&session_id.0) {
+            let _ = live.handle.stop();
+        }
 
         // Auto-select account for agy/antigravity if not yet selected
         {
@@ -752,12 +760,21 @@ impl SessionManager {
         // Run adapter preflight check before mutating session state
         self.adapter_factory.preflight(&ctx)?;
 
-        self.emit(AgentEvent::new(
-            EventKind::SessionStartRequested,
-            Some(session_id.clone()),
-            json!({}),
-            "human",
-        ))?;
+        if is_restart {
+            self.emit(AgentEvent::new(
+                EventKind::SessionRestartAttempted,
+                Some(session_id.clone()),
+                json!({}),
+                "human",
+            ))?;
+        } else {
+            self.emit(AgentEvent::new(
+                EventKind::SessionStartRequested,
+                Some(session_id.clone()),
+                json!({}),
+                "human",
+            ))?;
+        }
 
         self.do_transition(&session_id, SessionState::Starting, "human")?;
 
@@ -805,17 +822,38 @@ impl SessionManager {
                     SessionState::Working,
                     format!("adapter:{}", agent_type),
                 )?;
-                self.emit(AgentEvent::new(
-                    EventKind::SessionStarted,
-                    Some(session_id.clone()),
-                    json!({}),
-                    format!("adapter:{}", agent_type),
-                ))?;
-                info!("Session started: {}", session_id);
+                if is_restart {
+                    self.emit(AgentEvent::new(
+                        EventKind::SessionRestartSucceeded,
+                        Some(session_id.clone()),
+                        json!({}),
+                        format!("adapter:{}", agent_type),
+                    ))?;
+                    self.emit(AgentEvent::new(
+                        EventKind::SessionResumed,
+                        Some(session_id.clone()),
+                        json!({}),
+                        "human",
+                    ))?;
+                } else {
+                    self.emit(AgentEvent::new(
+                        EventKind::SessionStarted,
+                        Some(session_id.clone()),
+                        json!({}),
+                        format!("adapter:{}", agent_type),
+                    ))?;
+                }
+                self.reconcile_account_loads();
+                info!(
+                    "Session {}: {}",
+                    if is_restart { "restarted" } else { "started" },
+                    session_id
+                );
                 Ok(())
             }
             Ok((Some(AdapterEvent::StartFailed { reason }), _)) => {
                 self.do_transition(&session_id, SessionState::Failed, "system")?;
+                self.reconcile_account_loads();
                 bail!(
                     "Adapter start failed for session {}: {}",
                     session_id,
@@ -824,10 +862,12 @@ impl SessionManager {
             }
             Ok((None, _)) | Err(_) => {
                 self.do_transition(&session_id, SessionState::Failed, "system")?;
+                self.reconcile_account_loads();
                 bail!("Adapter start timed out for session {}", session_id);
             }
             Ok((Some(other), _)) => {
                 self.do_transition(&session_id, SessionState::Failed, "system")?;
+                self.reconcile_account_loads();
                 bail!(
                     "Unexpected first adapter event for session {}: {:?}",
                     session_id,
@@ -867,21 +907,33 @@ impl SessionManager {
             let session = self.get_session_or_err(&session_id)?;
             session.state.clone()
         };
-        if state == SessionState::Idle {
-            return self.cmd_start(session_id).await;
+        match state {
+            SessionState::Idle => self.cmd_start(session_id).await,
+            SessionState::Paused => {
+                self.do_transition(&session_id, SessionState::Working, "human")?;
+                if let Some(live) = self.adapters.get_mut(&session_id.0) {
+                    let _ = live.handle.send_command(AgentCommand::Resume);
+                }
+                self.emit(AgentEvent::new(
+                    EventKind::SessionResumed,
+                    Some(session_id.clone()),
+                    json!({}),
+                    "human",
+                ))?;
+                debug!("Session resumed: {}", session_id);
+                Ok(())
+            }
+            SessionState::Stopped | SessionState::Crashed => {
+                self.spawn_adapter(session_id, true).await
+            }
+            _ => {
+                bail!(
+                    "Session {} cannot be resumed from state {}",
+                    session_id,
+                    state
+                );
+            }
         }
-        if state != SessionState::Paused {
-            bail!("Session {} is not Paused (state={})", session_id, state);
-        }
-        self.do_transition(&session_id, SessionState::Working, "human")?;
-        self.emit(AgentEvent::new(
-            EventKind::SessionResumed,
-            Some(session_id.clone()),
-            json!({}),
-            "human",
-        ))?;
-        debug!("Session resumed: {}", session_id);
-        Ok(())
     }
 
     async fn cmd_stop(&mut self, session_id: Id, reason: Option<String>) -> Result<()> {
