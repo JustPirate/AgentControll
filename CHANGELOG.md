@@ -4,6 +4,18 @@ All notable changes to AgentControll are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.13] - 2026-11-17
+
+### Fixed
+- **Daemon Graceful Shutdown & Socket Cleanup**: Handled SIGTERM alongside SIGINT in `agentcontrold` using `tokio::select!`. IPC socket file is now guaranteed to be cleaned up on graceful shutdown or process termination, preventing stale socket errors on restart (resolves #2).
+- **Session Resumption for Stopped & Crashed Sessions**: Allowed `session.resume` in `SessionManager` and the state machine to restart sessions in `Stopped` and `Crashed` states with their preserved launch configuration, workspace, and account context (resolves #1).
+- **TUI Session Re-run Navigation**: Pressing `Space` to re-run a stopped or crashed session automatically focuses and navigates the session detail view to the newly started session.
+
+### Added
+- **CLI Conversation Resumption**: Added `-c` / `--conversation <ID>` flags to `ac session create` and `ac session run` to launch or resume specific Antigravity conversations.
+- **On-Demand Conversation Inspection**: Added `ac conversation list` and `ac session discover` commands to discover and inspect existing Antigravity conversations across host (`~/.gemini/`) and account profile storage without polluting the active session list.
+- **TUI Conversation Resume Field**: Added an optional "Resume Conversation ID" input field to `StartSessionForm` in the New Session modal.
+
 ## [1.0.12] - 2026-10-24
 
 ### Changed
