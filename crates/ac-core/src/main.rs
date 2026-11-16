@@ -128,10 +128,10 @@ async fn main() -> Result<()> {
         .with_project_registry(proj_handle.clone())
         .with_interaction_hub(hub_handle.clone());
 
-    tokio::spawn(async move { server.run().await });
+    let ipc_handle = tokio::spawn(async move { server.run().await });
 
     // ── 8. WebSocket server (Phase 7 / ADR-009) ───────────────────────────
-    if cfg.ws_enabled {
+    let ws_handle = if cfg.ws_enabled {
         let token_registry = ac_core::ws::TokenRegistry::new();
         if let Ok(env_token) = std::env::var("AC_WS_TOKEN") {
             token_registry.insert(env_token, ac_core::types::TokenScope::Admin);
@@ -175,27 +175,89 @@ async fn main() -> Result<()> {
 
         match ws_server {
             Ok(ws_server) => {
-                tokio::spawn(async move { ws_server.run().await });
+                let handle = tokio::spawn(async move { ws_server.run().await });
                 info!(
                     "WebSocket Control API v1 listening on ws://{}",
                     cfg.ws_bind_addr
                 );
+                Some(handle)
             }
-            Err(e) => warn!(
-                "WebSocket Control API unavailable at ws://{}: {e}; continuing with Unix socket IPC",
-                cfg.ws_bind_addr
-            ),
+            Err(e) => {
+                warn!(
+                    "WebSocket Control API unavailable at ws://{}: {e}; continuing with Unix socket IPC",
+                    cfg.ws_bind_addr
+                );
+                None
+            }
         }
-    }
+    } else {
+        None
+    };
 
     info!("Daemon ready. Listening on {}", cfg.socket_path.display());
 
     // ── 9. Shutdown signal ────────────────────────────────────────────────
-    match tokio::signal::ctrl_c().await {
-        Ok(()) => info!("Received SIGINT, shutting down"),
-        Err(e) => warn!("Signal error: {e}"),
+    wait_for_shutdown_signal().await;
+
+    // ── 10. Cleanup ───────────────────────────────────────────────────────
+    ipc_handle.abort();
+    let _ = ipc_handle.await;
+
+    if let Some(handle) = ws_handle {
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    if cfg.socket_path.exists() {
+        if let Err(e) = std::fs::remove_file(&cfg.socket_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!(
+                    "Failed to remove IPC socket {}: {e}",
+                    cfg.socket_path.display()
+                );
+            }
+        } else {
+            info!("Removed IPC socket {}", cfg.socket_path.display());
+        }
     }
 
     info!("agentcontrold stopped");
     Ok(())
+}
+
+#[cfg(unix)]
+async fn wait_for_shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+
+    let mut sigterm = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("Failed to register SIGTERM handler: {e}");
+            match tokio::signal::ctrl_c().await {
+                Ok(()) => info!("Received SIGINT, shutting down"),
+                Err(e) => warn!("Signal error: {e}"),
+            }
+            return;
+        }
+    };
+
+    tokio::select! {
+        res = tokio::signal::ctrl_c() => {
+            match res {
+                Ok(()) => info!("Received SIGINT, shutting down"),
+                Err(e) => warn!("Signal error: {e}"),
+            }
+        }
+        _ = sigterm.recv() => {
+            info!("Received SIGTERM, shutting down");
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_shutdown_signal() {
+    match tokio::signal::ctrl_c().await {
+        Ok(()) => info!("Received SIGINT, shutting down"),
+        Err(e) => warn!("Signal error: {e}"),
+    }
 }
