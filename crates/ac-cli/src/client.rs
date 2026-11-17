@@ -11,7 +11,8 @@ use tokio::{
 use tracing::debug;
 
 use ac_core::types::{
-    Account, AgentEvent, AgentSession, ApiRequest, ApiResponse, Id, Project, SubscriptionFilter,
+    Account, AgentEvent, AgentSession, ApiRequest, ApiResponse, Id, Project, SessionTemplate,
+    SubscriptionFilter,
 };
 
 #[derive(Debug, Clone)]
@@ -529,5 +530,131 @@ impl DaemonClient {
         });
 
         Ok(rx)
+    }
+
+    /// List all session templates.
+    pub async fn list_templates(&self) -> Result<Vec<SessionTemplate>> {
+        let resp = self.send_command("template.list", json!({})).await?;
+        if !resp.ok {
+            let msg = resp
+                .error
+                .map(|e| e.message)
+                .unwrap_or_else(|| "Unknown error".into());
+            anyhow::bail!("Failed to list templates: {msg}");
+        }
+        let result = resp.result.unwrap_or(json!({}));
+        let templates: Vec<SessionTemplate> =
+            serde_json::from_value(result["templates"].clone()).unwrap_or_default();
+        Ok(templates)
+    }
+
+    /// Retrieve a session template by slug name or ULID ID.
+    pub async fn get_template(&self, template: &str) -> Result<Option<SessionTemplate>> {
+        let resp = self
+            .send_command("template.get", json!({ "template": template }))
+            .await?;
+        if !resp.ok {
+            if let Some(ref err) = resp.error {
+                if err.code == "NotFound" {
+                    return Ok(None);
+                }
+            }
+            let msg = resp
+                .error
+                .map(|e| e.message)
+                .unwrap_or_else(|| "Unknown error".into());
+            anyhow::bail!("Failed to get template: {msg}");
+        }
+        let result = resp.result.context("Missing result in template.get")?;
+        let tmpl: SessionTemplate = serde_json::from_value(result["template"].clone())
+            .context("Failed to deserialize SessionTemplate")?;
+        Ok(Some(tmpl))
+    }
+
+    /// Create a new session template.
+    pub async fn create_template(&self, template: &SessionTemplate) -> Result<Id> {
+        let mut params = json!({
+            "name": template.name,
+            "agent_type": template.agent_type,
+        });
+        if let Some(ref d) = template.description {
+            params["description"] = json!(d);
+        }
+        if let Some(ref p) = template.default_task_prompt {
+            params["default_task_prompt"] = json!(p);
+        }
+        if let Some(ref t) = template.account_tag {
+            params["account_tag"] = json!(t);
+        }
+        if let Some(ref pm) = template.permission_mode {
+            params["permission_mode"] = json!(pm);
+        }
+        if let Some(ref m) = template.model {
+            params["model"] = json!(m);
+        }
+        if let Some(ref l) = template.launch_options {
+            params["launch"] = serde_json::to_value(l)?;
+        }
+
+        let resp = self.send_command("template.create", params).await?;
+        if !resp.ok {
+            let msg = resp
+                .error
+                .map(|e| e.message)
+                .unwrap_or_else(|| "Unknown error".into());
+            anyhow::bail!("Failed to create template: {msg}");
+        }
+
+        let tid = resp
+            .result
+            .and_then(|r| r["template_id"].as_str().map(Id::from))
+            .context("Missing template_id in template.create response")?;
+        Ok(tid)
+    }
+
+    /// Delete a session template by slug name or ULID ID.
+    pub async fn delete_template(&self, template: &str) -> Result<()> {
+        let resp = self
+            .send_command("template.delete", json!({ "template": template }))
+            .await?;
+        if !resp.ok {
+            let msg = resp
+                .error
+                .map(|e| e.message)
+                .unwrap_or_else(|| "Unknown error".into());
+            anyhow::bail!("Failed to delete template: {msg}");
+        }
+        Ok(())
+    }
+
+    /// Create and start a session configured by a session template.
+    pub async fn create_session_from_template(
+        &self,
+        template: &str,
+        task_override: Option<&str>,
+    ) -> Result<Id> {
+        let mut params = json!({
+            "template": template,
+            "start": true,
+        });
+        if let Some(t) = task_override {
+            params["task_description"] = json!(t);
+        }
+        let resp = self
+            .send_command("session.create_from_template", params)
+            .await?;
+        if !resp.ok {
+            let msg = resp
+                .error
+                .map(|e| e.message)
+                .unwrap_or_else(|| "Unknown error".into());
+            anyhow::bail!("Failed to launch from template: {msg}");
+        }
+
+        let sid = resp
+            .result
+            .and_then(|r| r["session_id"].as_str().map(Id::from))
+            .context("Missing session_id in create_session_from_template response")?;
+        Ok(sid)
     }
 }

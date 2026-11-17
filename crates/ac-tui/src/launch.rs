@@ -18,14 +18,16 @@ use crate::{
     client::ApiClient,
 };
 
-pub const FIELD_ACCOUNT: usize = 0;
-pub const FIELD_DIR: usize = 1;
-pub const FIELD_EXEC_MODE: usize = 2;
-pub const FIELD_PERM_MODE: usize = 3;
-pub const FIELD_MODEL: usize = 4;
-pub const FIELD_CONV_ID: usize = 5;
-pub const FIELD_BUTTONS: usize = 6;
-pub const FIELDS_COUNT: usize = 7;
+pub const FIELD_TEMPLATE: usize = 0;
+pub const FIELD_ACCOUNT: usize = 1;
+pub const FIELD_DIR: usize = 2;
+pub const FIELD_EXEC_MODE: usize = 3;
+pub const FIELD_PERM_MODE: usize = 4;
+pub const FIELD_MODEL: usize = 5;
+pub const FIELD_TASK_PROMPT: usize = 6;
+pub const FIELD_CONV_ID: usize = 7;
+pub const FIELD_BUTTONS: usize = 8;
+pub const FIELDS_COUNT: usize = 9;
 
 /// Open completion popup for the working-directory field.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +54,14 @@ impl DirCompletion {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StartSessionForm {
     pub field: usize,
+    /// 0 = None / Custom, 1..=N = template index + 1
+    pub template_index: usize,
+    /// Editable input for task prompt, populated from template `default_task_prompt`.
+    pub task_prompt: String,
+    /// Target agent type (default "agy").
+    pub agent_type: String,
+    /// Model ID requested by template, to be resolved once models finish loading.
+    pub pending_model: Option<String>,
     /// Index into [`agy_accounts`]; `len()` selects "+ Add Antigravity Account".
     pub account_index: usize,
     pub dir_input: String,
@@ -88,7 +98,11 @@ impl StartSessionForm {
             dir_input.push('/');
         }
         Self {
-            field: FIELD_ACCOUNT,
+            field: FIELD_TEMPLATE,
+            template_index: 0,
+            task_prompt: String::new(),
+            agent_type: "agy".to_string(),
+            pending_model: None,
             account_index: 0,
             dir_input,
             completion: None,
@@ -372,6 +386,91 @@ pub fn open_form(app: &mut App, form: Box<StartSessionForm>) {
     app.active_modal = Some(Modal::StartSession(form));
 }
 
+/// Apply the currently selected template to the form fields, auto-populating
+/// prompt, agent type, account, permission mode, model, and launch options.
+pub fn apply_template(app: &mut App, form: &mut StartSessionForm) {
+    if form.template_index == 0 {
+        // 0 = None / Custom session mode: leave fields for user configuration
+        return;
+    }
+    let Some(template) = app.templates.get(form.template_index - 1).cloned() else {
+        return;
+    };
+
+    // Target agent type
+    form.agent_type = if template.agent_type.is_empty() {
+        "agy".to_string()
+    } else {
+        template.agent_type.clone()
+    };
+
+    // Default task prompt
+    form.task_prompt = template.default_task_prompt.clone().unwrap_or_default();
+
+    // Account tag resolution
+    if let Some(ref tag) = template.account_tag {
+        let tag = tag.trim();
+        let accounts = agy_accounts(app);
+        if let Some(pos) = accounts.iter().position(|a| {
+            a.tags.iter().any(|t| t.eq_ignore_ascii_case(tag))
+                || a.label.eq_ignore_ascii_case(tag)
+                || a.id.0 == tag
+                || a.credential_ref.eq_ignore_ascii_case(tag)
+        }) {
+            form.account_index = pos;
+            if let Some(a) = accounts.get(pos).map(|a| (*a).clone()) {
+                request_models(app, &a);
+            }
+        }
+    }
+
+    // Permission mode
+    if let Some(ref pm_str) = template.permission_mode {
+        let normalized = pm_str.trim().to_lowercase().replace('_', "-");
+        let target = match normalized.as_str() {
+            "normal" => Some(AgyPermissionMode::Normal),
+            "dangerously-skip-permissions" | "bypass" => {
+                Some(AgyPermissionMode::DangerouslySkipPermissions)
+            }
+            _ => None,
+        };
+        if let Some(target_mode) = target {
+            if let Some(pos) = form.perm_modes.iter().position(|m| *m == target_mode) {
+                form.perm_mode_index = pos;
+            }
+        }
+    }
+
+    // Model: set pending_model and match in available models if loaded
+    form.pending_model = template.model.clone();
+    if let Some(ref target_model) = form.pending_model {
+        let (models, _) = model_options(app, form);
+        if let Some(pos) = models.iter().position(|(id, _)| {
+            id.as_deref() == Some(target_model.as_str())
+        }) {
+            form.model_index = pos;
+        } else {
+            form.model_index = 0;
+        }
+    } else {
+        form.model_index = 0;
+    }
+
+    // Launch options (execution_mode, working_dir)
+    if let Some(ref opts) = template.launch_options {
+        if let Some(pos) = form.exec_modes.iter().position(|m| *m == opts.execution_mode) {
+            form.exec_mode_index = pos;
+        }
+        if let Some(ref dir) = opts.working_dir {
+            let resolved = resolve_dir_input(dir, &form.cwd, &form.home);
+            form.dir_input = abbreviate_home(&resolved, &form.home);
+            if !form.dir_input.ends_with('/') {
+                form.dir_input.push('/');
+            }
+        }
+    }
+}
+
 fn cycle(i: usize, n: usize, forward: bool) -> usize {
     if n == 0 {
         0
@@ -435,6 +534,23 @@ pub fn poll_jobs(app: &mut App) {
         match job {
             JobResult::Models { account_id, result } => {
                 app.agy_models.insert(account_id, Some(result));
+                let resolved_index = if let Some(Modal::StartSession(form)) = app.active_modal.as_ref() {
+                    if let Some(ref target) = form.pending_model {
+                        let (models, _) = model_options(app, form);
+                        models
+                            .iter()
+                            .position(|(id, _)| id.as_deref() == Some(target.as_str()))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                if let Some(pos) = resolved_index {
+                    if let Some(Modal::StartSession(form)) = app.active_modal.as_mut() {
+                        form.model_index = pos;
+                    }
+                }
             }
             JobResult::Dirs {
                 parent,
@@ -592,13 +708,19 @@ pub async fn handle_key(
         }
         KeyCode::Tab => form.field = cycle(form.field, FIELDS_COUNT, true),
         KeyCode::Left | KeyCode::Right | KeyCode::Char(' ')
-            if form.field != FIELD_DIR && form.field != FIELD_CONV_ID =>
+            if form.field != FIELD_DIR && form.field != FIELD_CONV_ID && form.field != FIELD_TASK_PROMPT =>
         {
             let fwd = key.code != KeyCode::Left;
             match form.field {
+                FIELD_TEMPLATE => {
+                    let n_templates = app.templates.len();
+                    form.template_index = cycle(form.template_index, n_templates + 1, fwd);
+                    apply_template(app, &mut form);
+                }
                 FIELD_ACCOUNT => {
                     form.account_index = cycle(form.account_index, n_accounts + 1, fwd);
                     form.model_index = 0;
+                    form.pending_model = None;
                     form.error = None;
                     if let Some(a) = agy_accounts(app)
                         .get(form.account_index)
@@ -613,7 +735,10 @@ pub async fn handle_key(
                 FIELD_PERM_MODE => {
                     form.perm_mode_index = cycle(form.perm_mode_index, form.perm_modes.len(), fwd)
                 }
-                FIELD_MODEL => form.model_index = cycle(form.model_index, models.len(), fwd),
+                FIELD_MODEL => {
+                    form.model_index = cycle(form.model_index, models.len(), fwd);
+                    form.pending_model = None;
+                }
                 FIELD_BUTTONS => form.button = 1 - form.button,
                 _ => {}
             }
@@ -626,6 +751,10 @@ pub async fn handle_key(
             form.conversation_input.pop();
             form.error = None;
         }
+        KeyCode::Backspace if form.field == FIELD_TASK_PROMPT => {
+            form.task_prompt.pop();
+            form.error = None;
+        }
         KeyCode::Delete if form.field == FIELD_DIR => {
             form.dir_input.pop();
             after_dir_edit(app, &mut form);
@@ -634,12 +763,20 @@ pub async fn handle_key(
             form.conversation_input.pop();
             form.error = None;
         }
+        KeyCode::Delete if form.field == FIELD_TASK_PROMPT => {
+            form.task_prompt.pop();
+            form.error = None;
+        }
         KeyCode::Char(c) if form.field == FIELD_DIR => {
             form.dir_input.push(c);
             after_dir_edit(app, &mut form);
         }
         KeyCode::Char(c) if form.field == FIELD_CONV_ID => {
             form.conversation_input.push(c);
+            form.error = None;
+        }
+        KeyCode::Char(c) if form.field == FIELD_TASK_PROMPT => {
+            form.task_prompt.push(c);
             form.error = None;
         }
         KeyCode::Enter => match form.field {
@@ -734,11 +871,21 @@ async fn launch(app: &mut App, client: &ApiClient, mut form: Box<StartSessionFor
         return;
     };
     app.active_modal = None;
+    let task_desc = if form.task_prompt.trim().is_empty() {
+        "[interactive] session".to_string()
+    } else {
+        form.task_prompt.trim().to_string()
+    };
+    let agent_type = if form.agent_type.trim().is_empty() {
+        "agy"
+    } else {
+        form.agent_type.trim()
+    };
     crate::event::launch_session_and_open(
         app,
         client,
-        "[interactive] session",
-        "agy",
+        &task_desc,
+        agent_type,
         Some(&account),
         Some(&opts),
     )
@@ -754,6 +901,10 @@ pub fn handle_paste(app: &mut App, mut form: Box<StartSessionForm>, text: &str) 
     } else if form.field == FIELD_CONV_ID {
         let cleaned: String = text.chars().filter(|c| !c.is_whitespace()).collect();
         form.conversation_input.push_str(&cleaned);
+        form.error = None;
+    } else if form.field == FIELD_TASK_PROMPT {
+        let cleaned: String = text.chars().filter(|c| *c != '\r' && *c != '\n').collect();
+        form.task_prompt.push_str(&cleaned);
         form.error = None;
     }
     app.active_modal = Some(Modal::StartSession(form));

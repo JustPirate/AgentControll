@@ -6,9 +6,10 @@ This roadmap documents future initiatives, planned enhancements, and architectur
 
 ## Short-Term Roadmap (v1.1.0)
 
-### 1. Reusable Session Templates & Presets
+### 1. Reusable Session Templates & Presets [Completed]
 - Pre-configured profiles defining target agent (`agy`, `claude`), account tags, permission policies, and default system instructions.
 - Launch standardized sessions with a single command or hotkey.
+- **Status**: Completed (v1.1.0) — Delivered persistent SQLite storage (`templates.db`), IPC & WebSocket APIs (`template.create`, `template.list`, `template.get`, `template.delete`, `session.create_from_template`), CLI subcommands (`ac template <list|create|get|delete|run>` and `ac session run --template`), and interactive TUI template selector in the New Session modal.
 
 ### 2. Claude Code Multi-Account Isolation
 - Extend per-account home directory isolation (`~/.config/agentcontrol/profiles/<account-id>/`) from Antigravity to Claude Code.
@@ -49,7 +50,7 @@ This roadmap documents future initiatives, planned enhancements, and architectur
 
 | Initiative | Target Milestone | Complexity | Tracking Reference |
 |:---|:---|:---|:---|
-| Reusable Session Presets | v1.1.0 | Low | F10 |
+| Reusable Session Presets | v1.1.0 (Completed) | Low | F10 |
 | Claude Multi-Account Sandbox | v1.1.0 | Medium | ADR-014 |
 | OpenTelemetry Metrics Exporter | v1.1.0 | Medium | F12 |
 | Linux Landlock Sandboxing | v1.2.0 | High | F4 |

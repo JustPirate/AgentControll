@@ -19,6 +19,10 @@ pub mod policy_engine;
 pub mod project_registry;
 pub mod session;
 pub mod settings;
+pub mod template_manager;
 pub mod theme;
 pub mod types;
 pub mod ws;
+
+pub use template_manager::{TemplateManager, TemplateManagerHandle, TemplateStore};
+

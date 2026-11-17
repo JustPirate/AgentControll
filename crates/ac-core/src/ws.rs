@@ -29,10 +29,11 @@ use tracing::{debug, error, info};
 use crate::{
     account_manager::AccountManagerHandle,
     interaction_hub::InteractionHubHandle,
-    ipc::dispatch_request,
+    ipc::dispatch_request_ext,
     policy_engine::PolicyEngineHandle,
     project_registry::ProjectRegistryHandle,
     session::manager::SessionManagerHandle,
+    template_manager::TemplateManagerHandle,
     types::{AgentEvent, ApiRequest, ApiResponse, SubscriptionFilter, TokenScope},
 };
 
@@ -83,6 +84,7 @@ pub struct WsServer {
     project_registry: Option<ProjectRegistryHandle>,
     interaction_hub: Option<InteractionHubHandle>,
     policy_engine: Option<PolicyEngineHandle>,
+    template_mgr: Option<TemplateManagerHandle>,
     event_tx: broadcast::Sender<AgentEvent>,
     token_registry: TokenRegistry,
 }
@@ -105,6 +107,7 @@ impl WsServer {
             project_registry: None,
             interaction_hub: None,
             policy_engine: None,
+            template_mgr: None,
             event_tx,
             token_registry,
         })
@@ -130,6 +133,11 @@ impl WsServer {
         self
     }
 
+    pub fn with_template_manager(mut self, h: TemplateManagerHandle) -> Self {
+        self.template_mgr = Some(h);
+        self
+    }
+
     /// Returns the local bound socket address.
     pub fn local_addr(&self) -> Result<SocketAddr> {
         Ok(self.listener.local_addr()?)
@@ -147,11 +155,12 @@ impl WsServer {
                     let proj_reg = self.project_registry.clone();
                     let hub = self.interaction_hub.clone();
                     let policy = self.policy_engine.clone();
+                    let tmpl_mgr = self.template_mgr.clone();
                     let registry = self.token_registry.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = handle_ws_connection(
-                            stream, mgr, acct_mgr, proj_reg, hub, policy, evt_tx, registry,
+                            stream, mgr, acct_mgr, proj_reg, hub, policy, tmpl_mgr, evt_tx, registry,
                         )
                         .await
                         {
@@ -175,6 +184,7 @@ async fn handle_ws_connection(
     project_registry: Option<ProjectRegistryHandle>,
     interaction_hub: Option<InteractionHubHandle>,
     policy_engine: Option<PolicyEngineHandle>,
+    template_mgr: Option<TemplateManagerHandle>,
     event_tx: broadcast::Sender<AgentEvent>,
     token_registry: TokenRegistry,
 ) -> Result<()> {
@@ -388,13 +398,14 @@ async fn handle_ws_connection(
                         }
 
                         // Standard request dispatch
-                        let resp = dispatch_request(
+                        let resp = dispatch_request_ext(
                             &req,
                             &session_mgr,
                             &account_mgr,
                             &project_registry,
                             &interaction_hub,
                             &policy_engine,
+                            &template_mgr,
                             current_scope,
                         )
                         .await;

@@ -12,7 +12,8 @@ use crate::{
     app::App,
     launch::{
         self, split_input, StartSessionForm, FIELD_ACCOUNT, FIELD_BUTTONS, FIELD_CONV_ID,
-        FIELD_DIR, FIELD_EXEC_MODE, FIELD_MODEL, FIELD_PERM_MODE,
+        FIELD_DIR, FIELD_EXEC_MODE, FIELD_MODEL, FIELD_PERM_MODE, FIELD_TASK_PROMPT,
+        FIELD_TEMPLATE,
     },
 };
 
@@ -26,7 +27,7 @@ pub fn render(f: &mut Frame, app: &App, form: &StartSessionForm) {
     if f.area().width == 0 || f.area().height == 0 {
         return;
     }
-    let area = centered(74, 31, f.area());
+    let area = centered(74, 35, f.area());
     f.render_widget(Clear, area);
     let dim = Style::default().fg(Color::DarkGray);
     let label = |i: usize, t: &'static str| {
@@ -63,7 +64,7 @@ pub fn render(f: &mut Frame, app: &App, form: &StartSessionForm) {
                 },
             ),
             Span::styled(
-                if focused && i != FIELD_DIR && i != FIELD_CONV_ID {
+                if focused && i != FIELD_DIR && i != FIELD_CONV_ID && i != FIELD_TASK_PROMPT {
                     "   ←/→"
                 } else {
                     ""
@@ -86,30 +87,58 @@ pub fn render(f: &mut Frame, app: &App, form: &StartSessionForm) {
         .map(|(_, n)| n.clone())
         .unwrap_or_default();
 
+    let template_name = if form.template_index == 0 {
+        "(None - custom session)".to_string()
+    } else {
+        app.templates
+            .get(form.template_index - 1)
+            .map(|t| t.name.clone())
+            .unwrap_or_else(|| "(None - custom session)".to_string())
+    };
+
     let mut lines = vec![
         Line::from(""),
-        // Agent (Fixed display)
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled(
-                "Agent",
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        Line::from(vec![
-            Span::raw("   "),
-            Span::styled("Antigravity (agy CLI)", Style::default().fg(Color::Cyan)),
-        ]),
-        Line::from(""),
-        // Account
-        Line::from(vec![Span::raw(" "), label(FIELD_ACCOUNT, "Account")]),
-        value(FIELD_ACCOUNT, account),
-        Line::from(""),
-        // Working Directory
-        Line::from(vec![Span::raw(" "), label(FIELD_DIR, "Working Directory")]),
+        // Template
+        Line::from(vec![Span::raw(" "), label(FIELD_TEMPLATE, "Template")]),
+        value(FIELD_TEMPLATE, template_name),
     ];
+    if form.template_index > 0 {
+        if let Some(t) = app.templates.get(form.template_index - 1) {
+            if let Some(ref d) = t.description {
+                lines.push(Line::from(Span::styled(format!("   {d}"), dim)));
+            }
+        }
+    }
+    lines.push(Line::from(""));
+
+    // Agent
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        Span::styled(
+            "Agent",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw("   "),
+        Span::styled(
+            if form.agent_type == "agy" || form.agent_type.is_empty() {
+                "Antigravity (agy CLI)".to_string()
+            } else {
+                format!("{} (custom agent)", form.agent_type)
+            },
+            Style::default().fg(Color::Cyan),
+        ),
+    ]));
+    lines.push(Line::from(""));
+    // Account
+    lines.push(Line::from(vec![Span::raw(" "), label(FIELD_ACCOUNT, "Account")]));
+    lines.push(value(FIELD_ACCOUNT, account));
+    lines.push(Line::from(""));
+    // Working Directory
+    lines.push(Line::from(vec![Span::raw(" "), label(FIELD_DIR, "Working Directory")]));
 
     let dir_row = lines.len();
     let mut dir_line = value(FIELD_DIR, form.dir_input.clone());
@@ -183,6 +212,26 @@ pub fn render(f: &mut Frame, app: &App, form: &StartSessionForm) {
     if let Some(s) = model_status {
         lines.push(Line::from(Span::styled(format!("   {s}"), dim)));
     }
+    lines.push(Line::from(""));
+
+    // Task Prompt (Optional)
+    lines.push(Line::from(vec![
+        Span::raw(" "),
+        label(FIELD_TASK_PROMPT, "Task Prompt"),
+        Span::styled(" (optional)", dim),
+    ]));
+    let prompt_display = if form.task_prompt.is_empty() && form.field != FIELD_TASK_PROMPT {
+        "(none - interactive shell)".to_string()
+    } else {
+        form.task_prompt.clone()
+    };
+    let mut prompt_line = value(FIELD_TASK_PROMPT, prompt_display);
+    if form.field == FIELD_TASK_PROMPT {
+        prompt_line
+            .spans
+            .push(Span::styled("█", Style::default().fg(Color::Cyan)));
+    }
+    lines.push(prompt_line);
     lines.push(Line::from(""));
 
     // Resume Conversation ID (Optional)

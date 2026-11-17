@@ -7,7 +7,7 @@ use std::{
 
 use ac_core::types::{
     Account, AgentEvent, AgentSession, EventKind, Id, Interaction, InteractionState, Project,
-    SessionState,
+    SessionState, SessionTemplate,
 };
 
 use crate::prompt_history::PromptHistory;
@@ -347,6 +347,8 @@ pub struct App {
     pub events: Vec<AgentEvent>,
     pub selected_event: usize,
 
+    pub templates: Vec<SessionTemplate>,
+
     // Live session transcripts (session_id -> lines of transcript)
     pub session_transcripts: HashMap<String, Vec<String>>,
     // Live bounded virtual terminal buffers for session screens
@@ -445,6 +447,7 @@ impl App {
             selected_project: 0,
             events: Vec::new(),
             selected_event: 0,
+            templates: Vec::new(),
             session_transcripts: HashMap::new(),
             session_terminal_buffers: HashMap::new(),
             session_prompt_histories: HashMap::new(),

@@ -50,6 +50,9 @@ enum Commands {
     /// Session management commands.
     #[command(subcommand)]
     Session(SessionCmd),
+    /// Reusable session templates & presets.
+    #[command(subcommand)]
+    Template(TemplateCmd),
     /// Conversation inspection and discovery commands.
     #[command(subcommand)]
     Conversation(ConversationCmd),
@@ -104,6 +107,74 @@ enum ConversationCmd {
     List,
 }
 
+/// Template management subcommands.
+#[derive(Subcommand)]
+enum TemplateCmd {
+    /// List all session templates.
+    List,
+    /// Create a new session template.
+    Create {
+        /// Unique template slug/name (alphanumeric and dashes).
+        #[arg(long)]
+        name: String,
+        /// Optional human-readable description of this template.
+        #[arg(long)]
+        description: Option<String>,
+        /// Target agent type (default: agy).
+        #[arg(long, default_value = "agy")]
+        agent_type: String,
+        /// Default task description / prompt.
+        #[arg(long, alias = "default-task-prompt", alias = "task")]
+        prompt: Option<String>,
+        /// Model ID override (e.g. gemini-3.8-flash-medium).
+        #[arg(long)]
+        model: Option<String>,
+        /// Permission mode override (e.g. normal, dangerously-skip-permissions).
+        #[arg(long)]
+        permission_mode: Option<String>,
+        /// Account tag or selector for automatic account assignment.
+        #[arg(long, alias = "tag")]
+        account_tag: Option<String>,
+        /// Antigravity execution mode (e.g. plan, accept-edits).
+        #[arg(long)]
+        execution_mode: Option<String>,
+        /// Run in isolated sandbox container.
+        #[arg(long)]
+        sandbox: bool,
+        /// Initial working directory for the agent session.
+        #[arg(long, alias = "cwd")]
+        working_dir: Option<String>,
+    },
+    /// Get details for a specific template.
+    Get {
+        /// Template name or ID.
+        template: String,
+    },
+    /// Delete a session template.
+    #[command(alias = "remove")]
+    Delete {
+        /// Template name or ID.
+        template: String,
+    },
+    /// Create and immediately start a session configured by a template.
+    Run {
+        /// Template name or ID.
+        template: String,
+        /// Task description override for the agent.
+        #[arg(short, long)]
+        task: Option<String>,
+        /// Optional project ID.
+        #[arg(long)]
+        project_id: Option<String>,
+        /// Optional explicit account ID.
+        #[arg(long)]
+        account_id: Option<String>,
+        /// Optional conversation ID to resume.
+        #[arg(short = 'c', long = "conversation")]
+        conversation: Option<String>,
+    },
+}
+
 #[derive(Subcommand)]
 enum SessionCmd {
     /// Create a new session (without starting it).
@@ -131,9 +202,12 @@ enum SessionCmd {
     },
     /// Create and immediately start a session.
     Run {
-        /// Task description for the agent.
-        #[arg(short, long)]
-        task: String,
+        /// Task description for the agent (required unless --template is specified).
+        #[arg(short, long, required_unless_present = "template")]
+        task: Option<String>,
+        /// Optional template name or ID to configure the session.
+        #[arg(long)]
+        template: Option<String>,
         /// Agent type (default: agy).
         #[arg(short, long, default_value = "agy")]
         agent_type: String,
@@ -610,12 +684,64 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if cmd == "session.create_from_template" && params.get("task_description").is_none() {
+        if let Some(tmpl_name) = params.get("template").and_then(|v| v.as_str()) {
+            let check_resp = send_command(&cli.socket, "template.get", json!({ "template": tmpl_name })).await?;
+            if !check_resp.ok {
+                if cli.json {
+                    println!("{}", serde_json::to_string(&check_resp)?);
+                } else {
+                    let err = check_resp
+                        .error
+                        .map(|e| format!("{}: {}", e.code, e.message))
+                        .unwrap_or_else(|| "Template not found".into());
+                    eprintln!("Error [{}]", err);
+                }
+                std::process::exit(1);
+            }
+            if let Some(tmpl) = check_resp.result.as_ref().and_then(|r| r.get("template")) {
+                let prompt = tmpl
+                    .get("default_task_prompt")
+                    .and_then(|p| p.as_str())
+                    .unwrap_or("")
+                    .trim();
+                if prompt.is_empty() {
+                    if cli.json {
+                        let err_resp = json!({
+                            "v": 1,
+                            "ok": false,
+                            "error": {
+                                "code": "ValidationError",
+                                "message": format!("Template '{tmpl_name}' has no default task prompt; specify --task <TASK>")
+                            }
+                        });
+                        println!("{}", serde_json::to_string(&err_resp)?);
+                    } else {
+                        eprintln!("Error [ValidationError]: Template '{tmpl_name}' has no default task prompt; specify --task <TASK>");
+                    }
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+
     let resp = send_command(&cli.socket, &cmd, params).await?;
 
     let plain = cli.plain || !std::io::stdout().is_terminal();
 
     if cli.json {
-        println!("{}", serde_json::to_string(&resp)?);
+        if cmd == "session.get" && resp.ok {
+            if let Some(serde_json::Value::Object(mut map)) = resp.result.clone() {
+                map.insert("ok".into(), json!(true));
+                map.insert("v".into(), json!(resp.v));
+                map.insert("result".into(), resp.result.clone().unwrap_or(serde_json::Value::Null));
+                println!("{}", serde_json::to_string(&serde_json::Value::Object(map))?);
+            } else {
+                println!("{}", serde_json::to_string(&resp)?);
+            }
+        } else {
+            println!("{}", serde_json::to_string(&resp)?);
+        }
     } else {
         print_response(&resp, plain);
     }
@@ -659,24 +785,51 @@ fn build_request(commands: &Commands) -> Result<(String, serde_json::Value)> {
             ),
             SessionCmd::Run {
                 task,
+                template,
                 agent_type,
                 project_id,
                 account_id,
                 conversation,
             } => {
-                let mut map = serde_json::Map::new();
-                map.insert("task_description".into(), json!(task));
-                map.insert("agent_type".into(), json!(agent_type));
-                map.insert("project_id".into(), json!(project_id));
-                map.insert("account_id".into(), json!(account_id));
-                if let Some(cid) = conversation {
-                    map.insert("conversation_id".into(), json!(cid));
-                    map.insert("launch".into(), json!({ "conversation_id": cid }));
+                if let Some(tmpl) = template {
+                    let mut map = serde_json::Map::new();
+                    map.insert("template".into(), json!(tmpl));
+                    if let Some(t) = task {
+                        map.insert("task_description".into(), json!(t));
+                    }
+                    if let Some(pid) = project_id {
+                        map.insert("project_id".into(), json!(pid));
+                    }
+                    if let Some(aid) = account_id {
+                        map.insert("account_id".into(), json!(aid));
+                    }
+                    if let Some(cid) = conversation {
+                        map.insert("conversation_id".into(), json!(cid));
+                        map.insert("launch".into(), json!({ "conversation_id": cid }));
+                    }
+                    map.insert("start".into(), json!(true));
+                    (
+                        "session.create_from_template".to_owned(),
+                        serde_json::Value::Object(map),
+                    )
+                } else {
+                    let mut map = serde_json::Map::new();
+                    map.insert(
+                        "task_description".into(),
+                        json!(task.as_deref().unwrap_or_default()),
+                    );
+                    map.insert("agent_type".into(), json!(agent_type));
+                    map.insert("project_id".into(), json!(project_id));
+                    map.insert("account_id".into(), json!(account_id));
+                    if let Some(cid) = conversation {
+                        map.insert("conversation_id".into(), json!(cid));
+                        map.insert("launch".into(), json!({ "conversation_id": cid }));
+                    }
+                    (
+                        "session.create_and_start".to_owned(),
+                        serde_json::Value::Object(map),
+                    )
                 }
-                (
-                    "session.create_and_start".to_owned(),
-                    serde_json::Value::Object(map),
-                )
             }
             SessionCmd::Pause { session_id } => (
                 "session.pause".to_owned(),
@@ -732,6 +885,102 @@ fn build_request(commands: &Commands) -> Result<(String, serde_json::Value)> {
                 "session.handoff".to_owned(),
                 json!({ "session_id": session_id, "target_account_id": account_id }),
             ),
+        },
+
+        Commands::Template(t) => match t {
+            TemplateCmd::List => ("template.list".to_owned(), json!({})),
+            TemplateCmd::Get { template } => (
+                "template.get".to_owned(),
+                json!({ "template": template }),
+            ),
+            TemplateCmd::Delete { template } => (
+                "template.delete".to_owned(),
+                json!({ "template": template }),
+            ),
+            TemplateCmd::Create {
+                name,
+                description,
+                agent_type,
+                prompt,
+                model,
+                permission_mode,
+                account_tag,
+                execution_mode,
+                sandbox,
+                working_dir,
+            } => {
+                let mut map = serde_json::Map::new();
+                map.insert("name".into(), json!(name));
+                map.insert("agent_type".into(), json!(agent_type));
+                if let Some(d) = description {
+                    map.insert("description".into(), json!(d));
+                }
+                if let Some(p) = prompt {
+                    map.insert("default_task_prompt".into(), json!(p));
+                }
+                if let Some(m) = model.as_ref() {
+                    map.insert("model".into(), json!(m));
+                }
+                if let Some(pm) = permission_mode.as_ref() {
+                    map.insert("permission_mode".into(), json!(pm));
+                }
+                if let Some(tag) = account_tag {
+                    map.insert("account_tag".into(), json!(tag));
+                }
+                if let Some(wd) = working_dir.as_ref() {
+                    map.insert("working_dir".into(), json!(wd));
+                }
+
+                let mut launch = serde_json::Map::new();
+                if let Some(em) = execution_mode {
+                    launch.insert("execution_mode".into(), json!(em));
+                }
+                if *sandbox {
+                    launch.insert("sandbox".into(), json!(true));
+                }
+                if let Some(wd) = working_dir {
+                    launch.insert("working_dir".into(), json!(wd));
+                }
+                if let Some(pm) = permission_mode {
+                    launch.insert("permission_mode".into(), json!(pm));
+                }
+                if let Some(m) = model {
+                    launch.insert("model".into(), json!(m));
+                }
+                if !launch.is_empty() {
+                    map.insert("launch".into(), serde_json::Value::Object(launch));
+                }
+
+                ("template.create".to_owned(), serde_json::Value::Object(map))
+            }
+            TemplateCmd::Run {
+                template,
+                task,
+                project_id,
+                account_id,
+                conversation,
+            } => {
+                let mut map = serde_json::Map::new();
+                map.insert("template".into(), json!(template));
+                if let Some(t) = task {
+                    map.insert("task_description".into(), json!(t));
+                }
+                if let Some(pid) = project_id {
+                    map.insert("project_id".into(), json!(pid));
+                }
+                if let Some(aid) = account_id {
+                    map.insert("account_id".into(), json!(aid));
+                }
+                if let Some(cid) = conversation {
+                    map.insert("conversation_id".into(), json!(cid));
+                    map.insert("launch".into(), json!({ "conversation_id": cid }));
+                }
+                map.insert("start".into(), json!(true));
+                (
+                    "session.create_from_template".to_owned(),
+                    serde_json::Value::Object(map),
+                )
+            }
         },
 
         Commands::Conversation(c) => match c {
@@ -1073,6 +1322,53 @@ fn print_response(resp: &ApiResponse, plain: bool) {
                         s["state"].as_str().unwrap_or("?"),
                         agent_str,
                         s["task_description"].as_str().unwrap_or("?"),
+                    );
+                }
+                return;
+            }
+            // Templates list
+            if let Some(templates) = result.get("templates").and_then(|t| t.as_array()) {
+                if templates.is_empty() {
+                    if !plain {
+                        println!("No templates.");
+                    }
+                    return;
+                }
+                if plain {
+                    for t in templates {
+                        let id = t["id"].as_str().unwrap_or("?");
+                        let name = t["name"].as_str().unwrap_or("?");
+                        let agent = t["agent_type"].as_str().unwrap_or("?");
+                        let model = t["model"].as_str().unwrap_or("");
+                        let desc = t["description"]
+                            .as_str()
+                            .map(|s| s.replace(['\n', '\r', '\t'], " "))
+                            .unwrap_or_default();
+                        println!("{}\t{}\t{}\t{}\t{}", id, name, agent, model, desc);
+                    }
+                    return;
+                }
+                println!(
+                    "{:<26}  {:<24}  {:<8}  {:<24}  {}",
+                    "TEMPLATE ID", "NAME", "AGENT", "MODEL", "DESCRIPTION"
+                );
+                println!("{}", "-".repeat(100));
+                for t in templates {
+                    let id = t["id"].as_str().unwrap_or("?");
+                    let name = t["name"].as_str().unwrap_or("?");
+                    let agent = t["agent_type"].as_str().unwrap_or("?");
+                    let model = t["model"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("-");
+                    let desc = t["description"]
+                        .as_str()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.replace(['\n', '\r'], " "))
+                        .unwrap_or_else(|| "-".to_string());
+                    println!(
+                        "{:<26}  {:<24}  {:<8}  {:<24}  {}",
+                        id, name, agent, model, desc
                     );
                 }
                 return;

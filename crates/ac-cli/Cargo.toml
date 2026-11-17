@@ -45,3 +45,4 @@ ac-tui = { path = "../ac-tui" }
 [dev-dependencies]
 base64 = "0.22.1"
 tempfile = { workspace = true }
+rusqlite = { workspace = true }

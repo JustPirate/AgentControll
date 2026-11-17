@@ -63,9 +63,10 @@ async fn main() -> Result<()> {
     let mut store = EventStore::open(&cfg.db_path)
         .with_context(|| format!("opening event store at {}", cfg.db_path.display()))?;
 
-    // ── 4. Account manager + project registry ─────────────────────────────
+    // ── 4. Account manager + project registry + template manager ──────────
     let accounts_db = cfg.db_path.with_file_name("accounts.db");
     let projects_db = cfg.db_path.with_file_name("projects.db");
+    let templates_db = cfg.db_path.with_file_name("templates.db");
 
     let account_store = AccountStore::open(&accounts_db)
         .with_context(|| format!("opening account store at {}", accounts_db.display()))?;
@@ -76,6 +77,11 @@ async fn main() -> Result<()> {
         .with_context(|| format!("opening project store at {}", projects_db.display()))?;
     let project_reg = ProjectRegistry::new(project_store)?;
     let proj_handle = ProjectRegistryHandle::new(project_reg);
+
+    let template_store = ac_core::template_manager::TemplateStore::open(&templates_db)
+        .with_context(|| format!("opening template store at {}", templates_db.display()))?;
+    let template_mgr = ac_core::template_manager::TemplateManager::new(template_store)?;
+    let template_handle = ac_core::template_manager::TemplateManagerHandle::new(template_mgr);
 
     // ── Phase 3: Policy engine + Interaction hub ──────────────────────────
     let policies_db = cfg.db_path.with_file_name("policies.db");
@@ -126,7 +132,8 @@ async fn main() -> Result<()> {
         .context("binding IPC socket")?
         .with_account_manager(acct_handle.clone())
         .with_project_registry(proj_handle.clone())
-        .with_interaction_hub(hub_handle.clone());
+        .with_interaction_hub(hub_handle.clone())
+        .with_template_manager(template_handle.clone());
 
     let ipc_handle = tokio::spawn(async move { server.run().await });
 
@@ -171,6 +178,7 @@ async fn main() -> Result<()> {
                 .with_account_manager(acct_handle)
                 .with_project_registry(proj_handle)
                 .with_interaction_hub(hub_handle)
+                .with_template_manager(template_handle)
         });
 
         match ws_server {

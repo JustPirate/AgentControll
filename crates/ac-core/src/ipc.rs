@@ -19,10 +19,11 @@ use crate::{
     policy_engine::PolicyEngineHandle,
     project_registry::ProjectRegistryHandle,
     session::manager::SessionManagerHandle,
+    template_manager::TemplateManagerHandle,
     types::{
         Account, AgentEvent, ApiRequest, ApiResponse, Id, InteractionState, Policy,
-        PolicyCondition, PolicyDecision, PolicyScope, Project, SubscriptionFilter, TokenScope,
-        WorkspacePolicy,
+        PolicyCondition, PolicyDecision, PolicyScope, Project, SessionTemplate, SubscriptionFilter,
+        TokenScope, WorkspacePolicy,
     },
 };
 
@@ -35,6 +36,7 @@ pub struct IpcServer {
     project_registry: Option<ProjectRegistryHandle>,
     interaction_hub: Option<InteractionHubHandle>,
     policy_engine: Option<PolicyEngineHandle>,
+    template_mgr: Option<TemplateManagerHandle>,
     event_tx: broadcast::Sender<AgentEvent>,
 }
 
@@ -79,8 +81,17 @@ impl IpcServer {
             project_registry: None,
             interaction_hub: None,
             policy_engine: None,
+            template_mgr: None,
             event_tx,
         })
+    }
+
+    pub fn new(
+        socket_path: &Path,
+        session_mgr: SessionManagerHandle,
+        event_tx: broadcast::Sender<AgentEvent>,
+    ) -> Result<Self> {
+        Self::bind(socket_path, session_mgr, event_tx)
     }
 
     pub fn with_account_manager(mut self, h: AccountManagerHandle) -> Self {
@@ -103,6 +114,11 @@ impl IpcServer {
         self
     }
 
+    pub fn with_template_manager(mut self, h: TemplateManagerHandle) -> Self {
+        self.template_mgr = Some(h);
+        self
+    }
+
     pub async fn run(self) {
         loop {
             match self.listener.accept().await {
@@ -114,10 +130,12 @@ impl IpcServer {
                     let proj_reg = self.project_registry.clone();
                     let hub = self.interaction_hub.clone();
                     let policy = self.policy_engine.clone();
+                    let tmpl_mgr = self.template_mgr.clone();
                     tokio::spawn(async move {
-                        if let Err(e) =
-                            handle_connection(stream, mgr, acct_mgr, proj_reg, hub, policy, evt_tx)
-                                .await
+                        if let Err(e) = handle_connection(
+                            stream, mgr, acct_mgr, proj_reg, hub, policy, tmpl_mgr, evt_tx,
+                        )
+                        .await
                         {
                             warn!("IPC connection error: {e}");
                         }
@@ -154,6 +172,7 @@ pub fn is_mutating_cmd(cmd: &str) -> bool {
             | "session.start"
             | "session.create_and_start"
             | "session.run"
+            | "session.create_from_template"
             | "session.pause"
             | "session.resume"
             | "session.stop"
@@ -165,6 +184,10 @@ pub fn is_mutating_cmd(cmd: &str) -> bool {
             | "session.select_account"
             | "session.switch_account"
             | "session.handoff"
+            | "template.create"
+            | "template.update"
+            | "template.delete"
+            | "template.remove"
             | "account.register"
             | "account.disable"
             | "account.enable"
@@ -181,6 +204,25 @@ pub fn is_mutating_cmd(cmd: &str) -> bool {
             | "policy.remove"
             | "policy.delete"
     )
+}
+
+/// Parse a permission mode string into `AgyPermissionMode`.
+pub fn parse_permission_mode(s: &str) -> Option<crate::agy_launch::AgyPermissionMode> {
+    match s.trim().to_lowercase().replace('_', "-").as_str() {
+        "normal" => Some(crate::agy_launch::AgyPermissionMode::Normal),
+        "dangerously-skip-permissions" => {
+            Some(crate::agy_launch::AgyPermissionMode::DangerouslySkipPermissions)
+        }
+        _ => None,
+    }
+}
+
+fn is_valid_model_id(m: &str) -> bool {
+    !m.is_empty()
+        && m.len() <= 128
+        && !m.starts_with('-')
+        && m.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
 }
 
 /// Optional `launch` options of `session.create`. Unknown fields or values are
@@ -259,6 +301,30 @@ pub async fn dispatch_request(
     policy_engine: &Option<PolicyEngineHandle>,
     token_scope: Option<TokenScope>,
 ) -> ApiResponse {
+    dispatch_request_ext(
+        req,
+        session_mgr,
+        account_mgr,
+        project_registry,
+        interaction_hub,
+        policy_engine,
+        &None,
+        token_scope,
+    )
+    .await
+}
+
+/// Unified command dispatcher with template manager support.
+pub async fn dispatch_request_ext(
+    req: &ApiRequest,
+    session_mgr: &SessionManagerHandle,
+    account_mgr: &Option<AccountManagerHandle>,
+    project_registry: &Option<ProjectRegistryHandle>,
+    interaction_hub: &Option<InteractionHubHandle>,
+    policy_engine: &Option<PolicyEngineHandle>,
+    template_mgr: &Option<TemplateManagerHandle>,
+    token_scope: Option<TokenScope>,
+) -> ApiResponse {
     if req.v != 1 {
         return ApiResponse::err(
             &req.id,
@@ -282,7 +348,8 @@ pub async fn dispatch_request(
 
     let family = req.cmd.split('.').next().unwrap_or("");
     match family {
-        "session" => handle_session_cmd(req, session_mgr).await,
+        "session" => handle_session_cmd_ext(req, session_mgr, template_mgr, account_mgr).await,
+        "template" => handle_template_cmd(req, template_mgr).await,
         "conversation" => {
             if req.cmd == "conversation.list" {
                 match crate::agy_discovery::discover_all_conversations(None, None) {
@@ -329,6 +396,7 @@ async fn handle_connection(
     project_registry: Option<ProjectRegistryHandle>,
     interaction_hub: Option<InteractionHubHandle>,
     policy_engine: Option<PolicyEngineHandle>,
+    template_mgr: Option<TemplateManagerHandle>,
     event_tx: broadcast::Sender<AgentEvent>,
 ) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
@@ -415,13 +483,14 @@ async fn handle_connection(
             return Ok(());
         }
 
-        let resp = dispatch_request(
+        let resp = dispatch_request_ext(
             &req,
             &session_mgr,
             &account_mgr,
             &project_registry,
             &interaction_hub,
             &policy_engine,
+            &template_mgr,
             None,
         )
         .await;
@@ -434,7 +503,19 @@ async fn handle_connection(
 // ── Session commands ──────────────────────────────────────────────────────────
 
 pub async fn handle_session_cmd(req: &ApiRequest, mgr: &SessionManagerHandle) -> ApiResponse {
+    handle_session_cmd_ext(req, mgr, &None, &None).await
+}
+
+pub async fn handle_session_cmd_ext(
+    req: &ApiRequest,
+    mgr: &SessionManagerHandle,
+    template_mgr: &Option<TemplateManagerHandle>,
+    account_mgr: &Option<AccountManagerHandle>,
+) -> ApiResponse {
     match req.cmd.as_str() {
+        "session.create_from_template" => {
+            handle_session_create_from_template(req, mgr, template_mgr, account_mgr).await
+        }
         "session.create" => {
             let task = req.params["task_description"]
                 .as_str()
@@ -1352,6 +1433,566 @@ pub async fn handle_audit_cmd(
     }
 }
 
+// ── Template commands ────────────────────────────────────────────────────────
+
+pub async fn handle_template_cmd(
+    req: &ApiRequest,
+    template_mgr: &Option<TemplateManagerHandle>,
+) -> ApiResponse {
+    let Some(mgr_handle) = template_mgr else {
+        return ApiResponse::err(&req.id, "InternalError", "Template manager not configured");
+    };
+
+    match req.cmd.as_str() {
+        "template.create" => {
+            let name_str = req
+                .params
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+            let Some(name) = name_str else {
+                return ApiResponse::err(
+                    &req.id,
+                    "ValidationError",
+                    "Missing required 'name' parameter for template",
+                );
+            };
+
+            if !crate::template_manager::is_valid_template_name(name) {
+                return ApiResponse::err(
+                    &req.id,
+                    "ValidationError",
+                    format!(
+                        "Invalid template name '{name}': must be a non-empty alphanumeric slug (hyphens and underscores allowed)"
+                    ),
+                );
+            }
+
+            let agent_type = req
+                .params
+                .get("agent_type")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("agy");
+
+            let permission_mode = if let Some(pm_str) = req
+                .params
+                .get("permission_mode")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
+                if parse_permission_mode(pm_str).is_none() {
+                    return ApiResponse::err(
+                        &req.id,
+                        "ValidationError",
+                        format!(
+                            "Invalid permission mode: '{pm_str}'. Supported: 'normal', 'dangerously-skip-permissions'"
+                        ),
+                    );
+                }
+                Some(pm_str.to_string())
+            } else {
+                None
+            };
+
+            let model = if let Some(m_str) = req
+                .params
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
+                if !is_valid_model_id(m_str) {
+                    return ApiResponse::err(
+                        &req.id,
+                        "ValidationError",
+                        format!("Invalid model id: '{m_str}'"),
+                    );
+                }
+                Some(m_str.to_string())
+            } else {
+                None
+            };
+
+            let launch = match parse_launch(&req.params) {
+                Ok(l) => l,
+                Err(e) => return ApiResponse::err(&req.id, "ValidationError", e),
+            };
+
+            let mut template = SessionTemplate::new(name, agent_type);
+            template.description = req
+                .params
+                .get("description")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            template.default_task_prompt = req
+                .params
+                .get("default_task_prompt")
+                .or_else(|| req.params.get("prompt"))
+                .or_else(|| req.params.get("task"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty());
+            template.account_tag = req
+                .params
+                .get("account_tag")
+                .or_else(|| req.params.get("tag"))
+                .or_else(|| req.params.get("account"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            template.permission_mode = permission_mode;
+            template.model = model;
+            template.launch_options = launch;
+
+            let mut mgr = mgr_handle.0.lock().unwrap();
+            match mgr.create(template) {
+                Ok(id) => ApiResponse::ok(
+                    &req.id,
+                    json!({
+                        "template_id": id.0,
+                        "name": name,
+                    }),
+                ),
+                Err(e) => ApiResponse::err(&req.id, classify_error(&e), e.to_string()),
+            }
+        }
+        "template.list" => {
+            let mgr = mgr_handle.0.lock().unwrap();
+            let templates = mgr.list();
+            ApiResponse::ok(&req.id, json!({ "templates": templates }))
+        }
+        "template.get" => {
+            let ident = req
+                .params
+                .get("template")
+                .or_else(|| req.params.get("template_id"))
+                .or_else(|| req.params.get("id"))
+                .or_else(|| req.params.get("name"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+
+            let Some(query) = ident else {
+                return ApiResponse::err(
+                    &req.id,
+                    "ValidationError",
+                    "Missing template identifier ('template', 'template_id', or 'id')",
+                );
+            };
+
+            let mgr = mgr_handle.0.lock().unwrap();
+            match mgr.resolve(query) {
+                Some(t) => ApiResponse::ok(&req.id, json!({ "template": t })),
+                None => ApiResponse::err(&req.id, "NotFound", format!("Template not found: {query}")),
+            }
+        }
+        "template.delete" | "template.remove" => {
+            let ident = req
+                .params
+                .get("template")
+                .or_else(|| req.params.get("template_id"))
+                .or_else(|| req.params.get("id"))
+                .or_else(|| req.params.get("name"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+
+            let Some(query) = ident else {
+                return ApiResponse::err(
+                    &req.id,
+                    "ValidationError",
+                    "Missing template identifier ('template', 'template_id', or 'id')",
+                );
+            };
+
+            let mut mgr = mgr_handle.0.lock().unwrap();
+            let id = match mgr.resolve(query) {
+                Some(t) => t.id.clone(),
+                None => {
+                    return ApiResponse::err(
+                        &req.id,
+                        "NotFound",
+                        format!("Template not found: {query}"),
+                    )
+                }
+            };
+
+            match mgr.delete(&id) {
+                Ok(()) => ApiResponse::ok(&req.id, json!({})),
+                Err(e) => ApiResponse::err(&req.id, classify_error(&e), e.to_string()),
+            }
+        }
+        "template.update" => {
+            let ident = req
+                .params
+                .get("template")
+                .or_else(|| req.params.get("template_id"))
+                .or_else(|| req.params.get("id"))
+                .or_else(|| req.params.get("name"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+
+            let Some(query) = ident else {
+                return ApiResponse::err(
+                    &req.id,
+                    "ValidationError",
+                    "Missing template identifier ('template', 'template_id', or 'id')",
+                );
+            };
+
+            let mut mgr = mgr_handle.0.lock().unwrap();
+            let mut existing = match mgr.resolve(query) {
+                Some(t) => t.clone(),
+                None => {
+                    return ApiResponse::err(
+                        &req.id,
+                        "NotFound",
+                        format!("Template not found: {query}"),
+                    )
+                }
+            };
+
+            if let Some(new_name) = req
+                .params
+                .get("new_name")
+                .or_else(|| req.params.get("name"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
+                if !crate::template_manager::is_valid_template_name(new_name) {
+                    return ApiResponse::err(
+                        &req.id,
+                        "ValidationError",
+                        format!("Invalid template name '{new_name}': must be an alphanumeric slug"),
+                    );
+                }
+                existing.name = new_name.to_string();
+            }
+
+            if let Some(desc) = req.params.get("description") {
+                existing.description = desc
+                    .as_str()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+            }
+
+            if let Some(prompt) = req
+                .params
+                .get("default_task_prompt")
+                .or_else(|| req.params.get("prompt"))
+            {
+                existing.default_task_prompt = prompt
+                    .as_str()
+                    .map(|s| s.to_string())
+                    .filter(|s| !s.is_empty());
+            }
+
+            if let Some(tag) = req
+                .params
+                .get("account_tag")
+                .or_else(|| req.params.get("tag"))
+            {
+                existing.account_tag = tag
+                    .as_str()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty());
+            }
+
+            if let Some(pm) = req
+                .params
+                .get("permission_mode")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
+                if parse_permission_mode(pm).is_none() {
+                    return ApiResponse::err(
+                        &req.id,
+                        "ValidationError",
+                        format!("Invalid permission mode: '{pm}'"),
+                    );
+                }
+                existing.permission_mode = Some(pm.to_string());
+            }
+
+            if let Some(m) = req
+                .params
+                .get("model")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+            {
+                if !is_valid_model_id(m) {
+                    return ApiResponse::err(
+                        &req.id,
+                        "ValidationError",
+                        format!("Invalid model id: '{m}'"),
+                    );
+                }
+                existing.model = Some(m.to_string());
+            }
+
+            if let Ok(Some(l)) = parse_launch(&req.params) {
+                existing.launch_options = Some(l);
+            }
+
+            match mgr.update(existing.clone()) {
+                Ok(()) => ApiResponse::ok(
+                    &req.id,
+                    json!({ "template_id": existing.id.0, "name": existing.name }),
+                ),
+                Err(e) => ApiResponse::err(&req.id, classify_error(&e), e.to_string()),
+            }
+        }
+        other => ApiResponse::err(&req.id, "NotFound", format!("Unknown template command: {other}")),
+    }
+}
+
+// ── Session Creation from Template ──────────────────────────────────────────
+
+async fn handle_session_create_from_template(
+    req: &ApiRequest,
+    session_mgr: &SessionManagerHandle,
+    template_mgr: &Option<TemplateManagerHandle>,
+    account_mgr: &Option<AccountManagerHandle>,
+) -> ApiResponse {
+    let Some(template_handle) = template_mgr else {
+        return ApiResponse::err(&req.id, "InternalError", "Template manager not configured");
+    };
+
+    let template_query = req
+        .params
+        .get("template")
+        .or_else(|| req.params.get("template_id"))
+        .or_else(|| req.params.get("id"))
+        .or_else(|| req.params.get("name"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+
+    let Some(t_query) = template_query else {
+        return ApiResponse::err(
+            &req.id,
+            "ValidationError",
+            "Missing required 'template' parameter (template ID or name)",
+        );
+    };
+
+    let template = {
+        let mgr = template_handle.0.lock().unwrap();
+        match mgr.resolve(t_query) {
+            Some(t) => t.clone(),
+            None => {
+                return ApiResponse::err(
+                    &req.id,
+                    "NotFound",
+                    format!("Template not found: {t_query}"),
+                );
+            }
+        }
+    };
+
+    // Task description: explicit override -> template default prompt -> empty string
+    let task = req
+        .params
+        .get("task_description")
+        .or_else(|| req.params.get("task"))
+        .or_else(|| req.params.get("prompt"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .or_else(|| template.default_task_prompt.clone())
+        .unwrap_or_default();
+
+    // Agent type: explicit override -> template agent_type -> "agy"
+    let agent_type = req
+        .params
+        .get("agent_type")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| template.agent_type.clone());
+
+    let project_id = req
+        .params
+        .get("project_id")
+        .and_then(|v| v.as_str())
+        .map(Id::from);
+
+    // Account ID resolution
+    let mut account_id = req
+        .params
+        .get("account_id")
+        .and_then(|v| v.as_str())
+        .map(Id::from);
+    if account_id.is_none() {
+        if let Some(ref tag_or_id) = template.account_tag {
+            let selector = tag_or_id.trim();
+            if !selector.is_empty() {
+                if let Some(ref acct_h) = account_mgr {
+                    let mgr = acct_h.0.lock().unwrap();
+                    // Check if selector is an exact account ID
+                    if mgr.get(&Id::from(selector)).is_some() {
+                        account_id = Some(Id::from(selector));
+                    } else {
+                        // Check if selector matches an account label
+                        let by_label = mgr.find_by_label(selector);
+                        if let Some(first) = by_label.first() {
+                            account_id = Some(first.id.clone());
+                        } else {
+                            // Treat selector as an account tag filter
+                            match mgr.select(&agent_type, &[selector.to_string()]) {
+                                Ok(aid) => account_id = Some(aid),
+                                Err(e) => {
+                                    return ApiResponse::err(
+                                        &req.id,
+                                        "IncompatibleAccount",
+                                        format!(
+                                            "Failed to resolve account for template account_tag '{selector}': {e}"
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Launch options resolution
+    let mut resolved_launch = template.launch_options.clone().unwrap_or_default();
+
+    if let Some(ref pm_str) = template.permission_mode {
+        if let Some(pm) = parse_permission_mode(pm_str) {
+            resolved_launch.permission_mode = pm;
+        }
+    }
+
+    if let Some(ref model_str) = template.model {
+        if resolved_launch.model.is_none() {
+            resolved_launch.model = Some(model_str.clone());
+        }
+    }
+
+    // Caller overrides: if caller provided launch parameters or cwd/rows/cols/conv
+    let caller_launch = match parse_launch(&req.params) {
+        Ok(l) => l,
+        Err(e) => return ApiResponse::err(&req.id, "ValidationError", e),
+    };
+
+    if let Some(cl) = caller_launch {
+        if req
+            .params
+            .get("launch")
+            .and_then(|v| v.get("execution_mode"))
+            .is_some()
+            || cl.execution_mode != crate::agy_launch::AgyExecutionMode::Default
+        {
+            resolved_launch.execution_mode = cl.execution_mode;
+        }
+
+        if req
+            .params
+            .get("launch")
+            .and_then(|v| v.get("permission_mode"))
+            .is_some()
+            || cl.permission_mode != crate::agy_launch::AgyPermissionMode::Normal
+        {
+            resolved_launch.permission_mode = cl.permission_mode;
+        }
+
+        if req
+            .params
+            .get("launch")
+            .and_then(|v| v.get("sandbox"))
+            .is_some()
+            || cl.sandbox
+        {
+            resolved_launch.sandbox = cl.sandbox;
+        }
+
+        if cl.model.is_some() {
+            resolved_launch.model = cl.model;
+        }
+        if cl.working_dir.is_some() {
+            resolved_launch.working_dir = cl.working_dir;
+        }
+        if cl.initial_rows.is_some() {
+            resolved_launch.initial_rows = cl.initial_rows;
+        }
+        if cl.initial_cols.is_some() {
+            resolved_launch.initial_cols = cl.initial_cols;
+        }
+        if cl.conversation_id.is_some() {
+            resolved_launch.conversation_id = cl.conversation_id;
+        }
+    }
+
+    if let Some(conv) = req
+        .params
+        .get("conversation_id")
+        .or_else(|| req.params.get("conversation"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        resolved_launch.conversation_id = Some(conv.to_string());
+    }
+
+    if let Err(e) = resolved_launch.validate() {
+        return ApiResponse::err(&req.id, "ValidationError", e);
+    }
+
+    let session_id = match session_mgr
+        .create_with_launch(
+            task,
+            agent_type,
+            project_id,
+            account_id,
+            Some(resolved_launch),
+        )
+        .await
+    {
+        Ok(id) => id,
+        Err(e) => return ApiResponse::err(&req.id, classify_error(&e), e.to_string()),
+    };
+
+    let start = req
+        .params
+        .get("start")
+        .map(|v| v.as_bool() == Some(true) || v.as_str() == Some("true"))
+        .unwrap_or(false);
+
+    if start {
+        if let Err(e) = session_mgr.start(session_id.clone()).await {
+            return ApiResponse::err(
+                &req.id,
+                "InvalidState",
+                format!(
+                    "Session created ({}) but failed to start: {e}",
+                    session_id.0
+                ),
+            );
+        }
+    }
+
+    ApiResponse::ok(
+        &req.id,
+        json!({
+            "session_id": session_id.0,
+            "template_id": template.id.0,
+        }),
+    )
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 async fn send_line(write: &mut tokio::net::unix::OwnedWriteHalf, resp: &ApiResponse) -> Result<()> {
@@ -1390,6 +2031,11 @@ fn classify_error(e: &anyhow::Error) -> &'static str {
         "StaleSession"
     } else if msg.starts_with("ValidationError") {
         "ValidationError"
+    } else if msg.starts_with("Conflict")
+        || msg.contains("Conflict:")
+        || msg.contains("already exists")
+    {
+        "Conflict"
     } else if msg.contains("not found") || msg.contains("Not found") {
         "NotFound"
     } else if msg.contains("not available") || msg.contains("InvalidState") {

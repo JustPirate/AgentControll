@@ -15,6 +15,7 @@ dependencies = [
  "crossterm",
  "libc",
  "ratatui",
+ "rusqlite",
  "serde",
  "serde_json",
  "tempfile",

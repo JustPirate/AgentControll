@@ -12,7 +12,7 @@ use tracing::{debug, warn};
 
 use ac_core::types::{
     Account, AccountAvailability, AgentEvent, AgentSession, ApiRequest, ApiResponse, Id,
-    Interaction, PolicyDecision, Project, SessionSnapshot,
+    Interaction, PolicyDecision, Project, SessionSnapshot, SessionTemplate,
 };
 
 #[derive(Debug, Error)]
@@ -633,5 +633,98 @@ impl ApiClient {
             })
             .unwrap_or_else(|| session_id.clone());
         Ok(successor_id)
+    }
+
+    // ── Template APIs ────────────────────────────────────────────────────────
+
+    /// List all session templates.
+    pub async fn list_templates(&self) -> Result<Vec<SessionTemplate>, ClientError> {
+        let resp = self.send_request("template.list", json!({})).await?;
+        let templates = resp
+            .result
+            .and_then(|r| r.get("templates").cloned())
+            .map(serde_json::from_value::<Vec<SessionTemplate>>)
+            .transpose()?
+            .unwrap_or_default();
+        Ok(templates)
+    }
+
+    /// Retrieve a session template by slug name or ULID ID.
+    pub async fn get_template(&self, template: &str) -> Result<Option<SessionTemplate>, ClientError> {
+        match self
+            .send_request("template.get", json!({ "template": template }))
+            .await
+        {
+            Ok(resp) => {
+                let tmpl = resp
+                    .result
+                    .and_then(|r| r.get("template").cloned())
+                    .map(serde_json::from_value::<SessionTemplate>)
+                    .transpose()?;
+                Ok(tmpl)
+            }
+            Err(ClientError::ApiError { ref code, .. }) if code == "NotFound" => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Create and optionally start a session configured by a session template.
+    pub async fn create_session_from_template(
+        &self,
+        template: &str,
+        task_description: Option<&str>,
+        project_id: Option<&Id>,
+        account_id: Option<&Id>,
+        launch: Option<&ac_core::agy_launch::AgyLaunchOptions>,
+        start: bool,
+    ) -> Result<(Id, Id), ClientError> {
+        let mut params = json!({
+            "template": template,
+            "start": start,
+        });
+        if let Some(t) = task_description {
+            params["task_description"] = json!(t);
+        }
+        if let Some(p) = project_id {
+            params["project_id"] = json!(p);
+        }
+        if let Some(a) = account_id {
+            params["account_id"] = json!(a);
+        }
+        if let Some(l) = launch {
+            let mut l_val = json!(l);
+            if l.initial_rows.is_none() {
+                if let Ok((_, rows)) = crossterm::terminal::size() {
+                    l_val["initial_rows"] = json!(rows.saturating_sub(2).max(1));
+                }
+            }
+            if l.initial_cols.is_none() {
+                if let Ok((cols, _)) = crossterm::terminal::size() {
+                    l_val["initial_cols"] = json!(cols.max(1));
+                }
+            }
+            params["launch"] = l_val;
+        }
+
+        let resp = self
+            .send_request("session.create_from_template", params)
+            .await?;
+        let sid = resp
+            .result
+            .as_ref()
+            .and_then(|r| r.get("session_id").and_then(|v| v.as_str().map(Id::from)))
+            .ok_or_else(|| ClientError::ApiError {
+                code: "InvalidResponse".into(),
+                message: "Missing session_id in response".into(),
+            })?;
+        let tid = resp
+            .result
+            .as_ref()
+            .and_then(|r| r.get("template_id").and_then(|v| v.as_str().map(Id::from)))
+            .ok_or_else(|| ClientError::ApiError {
+                code: "InvalidResponse".into(),
+                message: "Missing template_id in response".into(),
+            })?;
+        Ok((sid, tid))
     }
 }

@@ -3694,6 +3694,9 @@ pub async fn refresh_data(app: &mut App, client: &ApiClient) {
     if let Ok(events) = client.query_events(None, Some(100)).await {
         app.events = events;
     }
+    if let Ok(templates) = client.list_templates().await {
+        app.templates = templates;
+    }
     app.clamp_selections();
     app.daemon_connected = client.check_daemon().await;
 

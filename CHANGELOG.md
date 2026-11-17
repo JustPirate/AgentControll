@@ -4,6 +4,16 @@ All notable changes to AgentControll are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Reusable Session Templates & Presets (F10)**: End-to-end framework for saving, managing, and instantiating standardized agent configurations across core daemon, IPC, CLI, and TUI.
+  - **Persistent SQLite Storage & Manager**: Added `TemplateStore` and `TemplateManager` with WAL mode (`templates.db`), providing slug-validated CRUD operations, unique name constraints, and in-memory caching (`crates/ac-core/src/template_manager.rs`).
+  - **IPC & WebSocket Template API**: Introduced `template.create`, `template.list`, `template.get`, `template.delete` / `template.remove`, `template.update`, and `session.create_from_template` endpoints with token scope enforcement (`crates/ac-core/src/ipc.rs`, `crates/ac-core/src/ws.rs`).
+  - **CLI Template Management Suite**: Added `ac template` command family (`list`, `create`, `get`, `delete`, `run`) with table, scriptable plain (`--plain`), and JSON (`--json`) output modes. Extended `ac session run` with `--template <NAME>` support (`crates/ac-cli/src/bin/ac.rs`, `crates/ac-cli/src/client.rs`).
+  - **Interactive TUI Template Selector**: Integrated template cycling and task prompt editing into `StartSessionForm`, auto-populating account, permission mode, model, and launch options with wrap-around navigation (`crates/ac-tui/src/launch.rs`, `crates/ac-tui/src/views/start_session.rs`).
+  - **Comprehensive Test Suite**: Added 87 end-to-end CLI template tests (`crates/ac-cli/tests/template_e2e_tests.rs`), IPC lifecycle and token-scope tests (`crates/ac-core/tests/template_tests.rs`), and TUI modal interaction tests (`crates/ac-tui/tests/start_session_tests.rs`).
+
 ## [1.0.13] - 2026-11-17
 
 ### Fixed

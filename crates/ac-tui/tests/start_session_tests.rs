@@ -7,16 +7,16 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
 
 use ac_core::{
-    agy_launch::{AgyExecutionMode, AgyPermissionMode},
-    types::{Account, Id},
+    agy_launch::{AgyExecutionMode, AgyLaunchOptions, AgyPermissionMode},
+    types::{Account, Id, SessionTemplate},
 };
 use ac_tui::{
     app::{AgyAddStep, AgyLoginTask, AgyLoginUpdate, App, Modal},
     client::ApiClient,
     event::{handle_key, poll_agy_login},
     launch::{
-        self, StartSessionForm, FIELD_BUTTONS, FIELD_CONV_ID, FIELD_DIR, FIELD_EXEC_MODE,
-        FIELD_MODEL, FIELD_PERM_MODE,
+        self, StartSessionForm, FIELD_ACCOUNT, FIELD_BUTTONS, FIELD_CONV_ID, FIELD_DIR,
+        FIELD_EXEC_MODE, FIELD_MODEL, FIELD_PERM_MODE, FIELD_TASK_PROMPT, FIELD_TEMPLATE,
     },
     ui,
 };
@@ -354,6 +354,7 @@ async fn permission_mode_account_and_model_selection_build_the_launch_options() 
     assert_eq!(launch::agy_accounts(&app)[form(&app).account_index].id, aid);
 
     // Account: →, including the "+ Add" entry, wraps around.
+    form_mut(&mut app).field = FIELD_ACCOUNT;
     keys(&mut app, &client, &[KeyCode::Right]).await;
     assert_eq!(launch::agy_accounts(&app)[form(&app).account_index].id, b);
     keys(&mut app, &client, &[KeyCode::Right]).await;
@@ -492,6 +493,7 @@ async fn safe_modes_launch_without_a_confirmation_and_esc_cancels() {
 async fn adding_an_account_from_the_form_returns_to_it() {
     let t = tree();
     let (mut app, client, _) = setup(t.path());
+    form_mut(&mut app).field = FIELD_ACCOUNT;
     form_mut(&mut app).account_index = 2; // "+ Add Antigravity Account"
     keys(&mut app, &client, &[KeyCode::Enter]).await;
     assert!(matches!(
@@ -693,4 +695,303 @@ async fn test_resume_conversation_id_paste() {
     };
     launch::handle_paste(&mut app, form_box, "  conv-pasted-999 \t\n");
     assert_eq!(form(&app).conversation_input, "conv-pasted-999");
+}
+
+fn make_test_template(
+    name: &str,
+    description: Option<&str>,
+    agent_type: &str,
+    prompt: Option<&str>,
+    account_tag: Option<&str>,
+    permission_mode: Option<&str>,
+    model: Option<&str>,
+    launch_options: Option<AgyLaunchOptions>,
+) -> SessionTemplate {
+    SessionTemplate {
+        id: Id::new(),
+        name: name.to_string(),
+        description: description.map(str::to_string),
+        agent_type: agent_type.to_string(),
+        default_task_prompt: prompt.map(str::to_string),
+        account_tag: account_tag.map(str::to_string),
+        permission_mode: permission_mode.map(str::to_string),
+        model: model.map(str::to_string),
+        launch_options,
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    }
+}
+
+#[tokio::test]
+async fn test_template_cycling_and_auto_population() {
+    let t = tree();
+    let (mut app, client, _) = setup(t.path());
+    let b_id = app.accounts[1].id.clone();
+
+    // Cache model for account 1
+    app.agy_models.insert(
+        b_id.0.clone(),
+        Some(Ok(vec![(
+            "gemini-3.8-flash-medium".into(),
+            "Gemini 3.8 Flash (Medium)".into(),
+        )])),
+    );
+
+    let t1 = make_test_template(
+        "code-review",
+        Some("Automated code review"),
+        "agy",
+        Some("Perform code review on latest commits"),
+        Some("24ct406@mgits.ac.in"),
+        Some("normal"),
+        Some("gemini-3.8-flash-medium"),
+        Some(AgyLaunchOptions {
+            execution_mode: AgyExecutionMode::Plan,
+            permission_mode: AgyPermissionMode::Normal,
+            sandbox: false,
+            model: None,
+            working_dir: None,
+            conversation_id: None,
+            initial_rows: None,
+            initial_cols: None,
+        }),
+    );
+
+    let t2 = make_test_template(
+        "security-audit",
+        Some("Security audit with elevated permissions"),
+        "agy",
+        Some("Run security vulnerability scan"),
+        None,
+        Some("dangerously_skip_permissions"),
+        None,
+        None,
+    );
+
+    app.templates = vec![t1, t2];
+
+    // Initial state: custom session mode
+    assert_eq!(form(&app).field, FIELD_TEMPLATE);
+    assert_eq!(form(&app).template_index, 0);
+    assert_eq!(form(&app).task_prompt, "");
+    let screen = render(&app);
+    assert!(screen.contains("Template"), "{screen}");
+    assert!(screen.contains("(None - custom session)"), "{screen}");
+
+    // Press Right to select template 1 (code-review)
+    keys(&mut app, &client, &[KeyCode::Right]).await;
+    assert_eq!(form(&app).template_index, 1);
+    assert_eq!(form(&app).task_prompt, "Perform code review on latest commits");
+    assert_eq!(form(&app).account_index, 1); // matched 24ct406@mgits.ac.in
+    assert_eq!(form(&app).exec_mode(), AgyExecutionMode::Plan);
+    assert_eq!(form(&app).perm_mode(), AgyPermissionMode::Normal);
+    assert_eq!(form(&app).model_index, 1); // matched gemini-3.8-flash-medium
+
+    let screen = render(&app);
+    assert!(screen.contains("code-review"), "{screen}");
+    assert!(screen.contains("Automated code review"), "{screen}");
+    assert!(screen.contains("Perform code review on latest commits"), "{screen}");
+
+    // Press Right to select template 2 (security-audit)
+    keys(&mut app, &client, &[KeyCode::Right]).await;
+    assert_eq!(form(&app).template_index, 2);
+    assert_eq!(form(&app).task_prompt, "Run security vulnerability scan");
+    assert_eq!(form(&app).perm_mode(), AgyPermissionMode::DangerouslySkipPermissions);
+
+    let screen = render(&app);
+    assert!(screen.contains("security-audit"), "{screen}");
+    assert!(screen.contains("Security audit with elevated permissions"), "{screen}");
+    assert!(screen.contains("Run security vulnerability scan"), "{screen}");
+}
+
+#[tokio::test]
+async fn test_template_task_prompt_user_override() {
+    let t = tree();
+    let (mut app, client, _) = setup(t.path());
+
+    let t1 = make_test_template(
+        "test-runner",
+        Some("Run test suite"),
+        "agy",
+        Some("cargo test"),
+        None,
+        Some("normal"),
+        None,
+        None,
+    );
+    app.templates = vec![t1];
+
+    // Select template 1
+    keys(&mut app, &client, &[KeyCode::Right]).await;
+    assert_eq!(form(&app).task_prompt, "cargo test");
+
+    // Focus FIELD_TASK_PROMPT and type extra arguments
+    form_mut(&mut app).field = FIELD_TASK_PROMPT;
+    type_str(&mut app, &client, " --lib").await;
+    assert_eq!(form(&app).task_prompt, "cargo test --lib");
+
+    // Backspace removes last char
+    keys(&mut app, &client, &[KeyCode::Backspace]).await;
+    assert_eq!(form(&app).task_prompt, "cargo test --li");
+
+    // Delete removes last char
+    keys(&mut app, &client, &[KeyCode::Delete]).await;
+    assert_eq!(form(&app).task_prompt, "cargo test --l");
+
+    // Also override execution mode
+    form_mut(&mut app).field = FIELD_EXEC_MODE;
+    keys(&mut app, &client, &[KeyCode::Right]).await;
+    assert_eq!(form(&app).exec_mode(), AgyExecutionMode::AcceptEdits);
+
+    let screen = render(&app);
+    assert!(screen.contains("cargo test --l"), "{screen}");
+}
+
+#[tokio::test]
+async fn test_template_dangerous_mode_requires_confirmation() {
+    let t = tree();
+    let (mut app, client, _) = setup(t.path());
+
+    let t_danger = make_test_template(
+        "auto-fix",
+        Some("Autonomous fix mode"),
+        "agy",
+        Some("fix compiler errors"),
+        None,
+        Some("dangerously-skip-permissions"),
+        None,
+        None,
+    );
+    app.templates = vec![t_danger];
+
+    // Select template 1
+    keys(&mut app, &client, &[KeyCode::Right]).await;
+    assert_eq!(form(&app).perm_mode(), AgyPermissionMode::DangerouslySkipPermissions);
+
+    // Press Enter to submit from FIELD_TEMPLATE
+    keys(&mut app, &client, &[KeyCode::Enter]).await;
+    assert_eq!(form(&app).confirm_dangerous, Some(0), "Cancel should be default focused button");
+
+    let screen = render(&app);
+    assert!(screen.contains("Dangerously Skip Permissions") || screen.contains("Dangerous Mode"), "{screen}");
+
+    // Cancel confirmation via Esc
+    keys(&mut app, &client, &[KeyCode::Esc]).await;
+    assert_eq!(form(&app).confirm_dangerous, None);
+    assert!(app.active_modal.is_some());
+
+    // Press Enter again to re-open confirmation
+    keys(&mut app, &client, &[KeyCode::Enter]).await;
+    assert_eq!(form(&app).confirm_dangerous, Some(0));
+
+    // Toggle to Continue (1)
+    keys(&mut app, &client, &[KeyCode::Right]).await;
+    assert_eq!(form(&app).confirm_dangerous, Some(1));
+
+    // Press Enter to launch
+    keys(&mut app, &client, &[KeyCode::Enter]).await;
+    assert!(app.active_modal.is_none(), "Session launched after explicit dangerous confirmation");
+}
+
+#[tokio::test]
+async fn test_template_options_wrap_around() {
+    let t = tree();
+    let (mut app, client, _) = setup(t.path());
+
+    let t1 = make_test_template("t1", None, "agy", None, None, None, None, None);
+    let t2 = make_test_template("t2", None, "agy", None, None, None, None, None);
+    app.templates = vec![t1, t2];
+
+    assert_eq!(form(&app).template_index, 0);
+
+    // Left from 0 wraps to 2
+    keys(&mut app, &client, &[KeyCode::Left]).await;
+    assert_eq!(form(&app).template_index, 2);
+
+    // Left from 2 goes to 1
+    keys(&mut app, &client, &[KeyCode::Left]).await;
+    assert_eq!(form(&app).template_index, 1);
+
+    // Left from 1 goes to 0
+    keys(&mut app, &client, &[KeyCode::Left]).await;
+    assert_eq!(form(&app).template_index, 0);
+
+    // Right from 0 goes to 1
+    keys(&mut app, &client, &[KeyCode::Right]).await;
+    assert_eq!(form(&app).template_index, 1);
+
+    // Right from 1 goes to 2
+    keys(&mut app, &client, &[KeyCode::Right]).await;
+    assert_eq!(form(&app).template_index, 2);
+
+    // Right from 2 wraps to 0
+    keys(&mut app, &client, &[KeyCode::Right]).await;
+    assert_eq!(form(&app).template_index, 0);
+}
+
+#[tokio::test]
+async fn test_template_task_prompt_paste() {
+    let t = tree();
+    let (mut app, _, _) = setup(t.path());
+
+    form_mut(&mut app).field = FIELD_TASK_PROMPT;
+    let form_box = match app.active_modal.take() {
+        Some(Modal::StartSession(f)) => f,
+        _ => unreachable!(),
+    };
+    launch::handle_paste(&mut app, form_box, "Refactor database migrations\r\n");
+    assert_eq!(form(&app).task_prompt, "Refactor database migrations");
+}
+
+#[tokio::test]
+async fn test_template_pending_model_resolution_on_job_completion() {
+    let t = tree();
+    let (mut app, client, _) = setup(t.path());
+    let a_id = app.accounts[0].id.clone();
+
+    let t1 = make_test_template(
+        "model-template",
+        None,
+        "agy",
+        None,
+        None,
+        None,
+        Some("gemini-pro-preview"),
+        None,
+    );
+    app.templates = vec![t1];
+
+    // Select template 1
+    keys(&mut app, &client, &[KeyCode::Right]).await;
+    assert_eq!(form(&app).pending_model, Some("gemini-pro-preview".into()));
+    assert_eq!(form(&app).model_index, 0, "Model not loaded yet, index remains 0");
+
+    // Deliver background JobResult::Models
+    app.launch_jobs.lock().unwrap().push(launch::JobResult::Models {
+        account_id: a_id.0.clone(),
+        result: Ok(vec![
+            ("gemini-flash".into(), "Gemini Flash".into()),
+            ("gemini-pro-preview".into(), "Gemini Pro Preview".into()),
+        ]),
+    });
+    launch::poll_jobs(&mut app);
+
+    assert_eq!(form(&app).model_index, 2, "pending_model resolved to index 2");
+}
+
+#[tokio::test]
+async fn test_api_client_template_methods() {
+    let client = ApiClient::new(std::env::temp_dir().join(format!("no-daemon-{}.sock", ulid::Ulid::new())));
+    
+    // Check list_templates with unreachable daemon returns ClientError::DaemonUnavailable
+    let list_res = client.list_templates().await;
+    assert!(matches!(list_res, Err(ac_tui::client::ClientError::DaemonUnavailable(_, _))));
+
+    // Check get_template with unreachable daemon
+    let get_res = client.get_template("my-template").await;
+    assert!(matches!(get_res, Err(ac_tui::client::ClientError::DaemonUnavailable(_, _))));
+
+    // Check create_session_from_template with unreachable daemon
+    let create_res = client.create_session_from_template("my-template", Some("task"), None, None, None, true).await;
+    assert!(matches!(create_res, Err(ac_tui::client::ClientError::DaemonUnavailable(_, _))));
 }

@@ -234,6 +234,10 @@ pub enum EventKind {
     DaemonShutdownRequested,
     DaemonStopped,
     SnapshotCreated,
+    // Phase 10: Session Template events
+    TemplateCreated,
+    TemplateUpdated,
+    TemplateDeleted,
 }
 
 impl fmt::Display for EventKind {
@@ -1177,3 +1181,55 @@ impl AuditEntry {
         }
     }
 }
+
+// ── Phase 10: Session Template ────────────────────────────────────────────────
+
+/// A reusable preset / template for creating agent sessions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionTemplate {
+    pub id: Id,
+    /// Unique human-readable name or slug (e.g. "code-review", "deep-research").
+    pub name: String,
+    /// Optional human-readable description of this template's purpose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Target agent type (e.g. "agy", "claude").
+    pub agent_type: String,
+    /// Default initial task description / prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_task_prompt: Option<String>,
+    /// Account tag or selector for automatic account assignment (e.g. "tier1", "fast").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_tag: Option<String>,
+    /// Permission mode override (e.g. "normal", "dangerously-skip-permissions").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission_mode: Option<String>,
+    /// Model ID override (e.g. "gemini-3.8-flash-medium").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// Detailed per-session launch options (execution mode, sandbox, cwd, terminal geometry).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch_options: Option<crate::agy_launch::AgyLaunchOptions>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl SessionTemplate {
+    pub fn new(name: impl Into<String>, agent_type: impl Into<String>) -> Self {
+        let now = Utc::now();
+        Self {
+            id: Id::new(),
+            name: name.into(),
+            description: None,
+            agent_type: agent_type.into(),
+            default_task_prompt: None,
+            account_tag: None,
+            permission_mode: None,
+            model: None,
+            launch_options: None,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+}
+
