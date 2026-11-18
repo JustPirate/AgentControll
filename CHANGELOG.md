@@ -4,6 +4,19 @@ All notable changes to AgentControll are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Webhook & External Notification Triggers (F8)**: Asynchronous, non-blocking notification and webhook dispatch system in `agentcontrold` triggering alerts on critical session lifecycle and account events (`SessionCrashed`, `HumanInterventionRequired`, `QuotaExhausted`, `SessionStopped`, `SessionFinished`).
+  - **Notification Dispatcher Engine**: Event-driven dispatcher running as an independent background task subscribed to `AgentEvent` broadcast streams with trigger filtering, delivery metrics tracking, timeout enforcement, and exponential backoff retry handling on 5xx errors.
+  - **Discord Webhooks**: Rich embed formatter with color coding (red for crash/failure, yellow for intervention/rate limit, green for completion/stop, blue for test/info), session ID, agent type, timestamp, and error details.
+  - **Slack Webhooks**: Incoming webhook payload formatter with colored attachments and structured fields.
+  - **Generic HTTP Webhooks**: Configurable endpoints receiving standard JSON payloads (`{ "event", "timestamp", "session_id", "payload" }`) with timeout and exponential retry handling.
+  - **Local Desktop Notifications**: Asynchronous desktop alert delivery using `notify-send` on Linux and `osascript` on macOS with urgency levels and timeout protection, resilient against headless displays.
+  - **Configuration & Environment Variables**: Configured via `[notifications]` in `config.toml` and overridden by `AC_DISCORD_WEBHOOK` and `AC_SLACK_WEBHOOK`.
+  - **IPC & WebSocket Support**: `notification.test` and `notification.status` endpoints with token scope mutation enforcement.
+  - **CLI Subcommand**: Added `ac notify test` / `ac notification test` and `ac notify status` / `ac notification status` commands with pretty table and scriptable plain (`--plain`) formatting modes, and client RPC methods in `DaemonClient`.
+
 ## [1.1.0] - 2026-11-18
 
 ### Added

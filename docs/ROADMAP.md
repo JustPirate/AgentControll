@@ -29,8 +29,9 @@ This roadmap documents future initiatives, planned enhancements, and architectur
 - Enforce strict filesystem boundaries ensuring agent child processes cannot access paths outside their designated working directories or account profiles.
 - Complement existing policy engine checks with kernel-level security isolation.
 
-### 5. Webhook & External Notification Triggers
-- Configurable webhooks to push critical events (`SessionCrashed`, `HumanInterventionRequired`, `QuotaExhausted`) to Discord, Slack, or desktop notifications.
+### 5. Webhook & External Notification Triggers [Completed]
+- Configurable webhooks to push critical events (`SessionCrashed`, `HumanInterventionRequired`, `QuotaExhausted`, `SessionStopped`, `SessionFinished`) to Discord, Slack, generic HTTP webhooks, or desktop notifications.
+- **Status**: Completed (v1.2.0) — Delivered asynchronous notification dispatcher engine (`crates/ac-core/src/notifications.rs`) with rich Discord embeds, Slack attachments, generic HTTP JSON webhooks with exponential backoff retries, local desktop notifications (`notify-send` / `osascript`), IPC & WebSocket APIs (`notification.test`, `notification.status`), CLI subcommands (`ac notify test`, `ac notify status`), and client RPC methods in `DaemonClient`.
 
 ### 6. Dynamic Adapter Plugins
 - Allow third-party agent adapters to be registered as external executables communicating over stdin/stdout JSON-RPC, without requiring recompilation of `agentcontrold`.
@@ -56,7 +57,7 @@ This roadmap documents future initiatives, planned enhancements, and architectur
 | Claude Multi-Account Sandbox | v1.1.0 (Completed) | Medium | ADR-014 |
 | OpenTelemetry Metrics Exporter | v1.1.0 (Completed) | Medium | F12 |
 | Linux Landlock Sandboxing | v1.2.0 | High | F4 |
-| Webhook Alert Dispatcher | v1.2.0 | Low | F8 |
+| Webhook Alert Dispatcher | v1.2.0 (Completed) | Low | F8 |
 | Subprocess Adapter Plugins | v1.2.0 | High | F5 / ADR-008 |
 | Remote Cluster Execution | v2.0.0 | High | F1 |
 | Web Companion Dashboard | v2.0.0 | Medium | F3 |

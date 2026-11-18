@@ -23,6 +23,7 @@ use ac_core::{
     config::Config,
     event_store::EventStore,
     ipc::IpcServer,
+    notifications::NotificationDispatcher,
     project_registry::{ProjectRegistry, ProjectRegistryHandle, ProjectStore},
     session::manager::{SessionManager, SessionManagerHandle},
     types::{AgentEvent, EventKind},
@@ -127,13 +128,30 @@ async fn main() -> Result<()> {
     let mgr_handle = SessionManagerHandle::new(cmd_tx);
     tokio::spawn(async move { manager.run().await });
 
+    // ── 6.5. Notification dispatcher (Feature F8) ─────────────────────────
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(cfg.notifications.timeout_ms))
+        .build()
+        .unwrap_or_default();
+    let notification_dispatcher = NotificationDispatcher::new(cfg.notifications.clone(), client);
+    let notification_handle = notification_dispatcher.handle();
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let notify_event_rx = event_tx.subscribe();
+    let notify_handle = tokio::spawn(async move {
+        notification_dispatcher
+            .run(notify_event_rx, shutdown_rx)
+            .await;
+    });
+
     // ── 7. IPC server ─────────────────────────────────────────────────────
     let server = IpcServer::bind(&cfg.socket_path, mgr_handle.clone(), event_tx.clone())
         .context("binding IPC socket")?
         .with_account_manager(acct_handle.clone())
         .with_project_registry(proj_handle.clone())
         .with_interaction_hub(hub_handle.clone())
-        .with_template_manager(template_handle.clone());
+        .with_template_manager(template_handle.clone())
+        .with_notification_handle(notification_handle.clone());
 
     let ipc_handle = tokio::spawn(async move { server.run().await });
 
@@ -179,6 +197,7 @@ async fn main() -> Result<()> {
                 .with_project_registry(proj_handle.clone())
                 .with_interaction_hub(hub_handle.clone())
                 .with_template_manager(template_handle.clone())
+                .with_notification_handle(notification_handle)
         });
 
         match ws_server {
@@ -238,6 +257,10 @@ async fn main() -> Result<()> {
     wait_for_shutdown_signal().await;
 
     // ── 10. Cleanup ───────────────────────────────────────────────────────
+    let _ = shutdown_tx.send(true);
+    notify_handle.abort();
+    let _ = notify_handle.await;
+
     ipc_handle.abort();
     let _ = ipc_handle.await;
 

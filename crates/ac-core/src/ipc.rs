@@ -16,6 +16,7 @@ use tracing::{debug, error, info, warn};
 use crate::{
     account_manager::AccountManagerHandle,
     interaction_hub::InteractionHubHandle,
+    notifications::{NotificationHandle, NotificationStatusReport},
     policy_engine::PolicyEngineHandle,
     project_registry::ProjectRegistryHandle,
     session::manager::SessionManagerHandle,
@@ -37,6 +38,7 @@ pub struct IpcServer {
     interaction_hub: Option<InteractionHubHandle>,
     policy_engine: Option<PolicyEngineHandle>,
     template_mgr: Option<TemplateManagerHandle>,
+    notification_handle: Option<NotificationHandle>,
     event_tx: broadcast::Sender<AgentEvent>,
 }
 
@@ -82,6 +84,7 @@ impl IpcServer {
             interaction_hub: None,
             policy_engine: None,
             template_mgr: None,
+            notification_handle: None,
             event_tx,
         })
     }
@@ -119,6 +122,11 @@ impl IpcServer {
         self
     }
 
+    pub fn with_notification_handle(mut self, handle: NotificationHandle) -> Self {
+        self.notification_handle = Some(handle);
+        self
+    }
+
     pub async fn run(self) {
         loop {
             match self.listener.accept().await {
@@ -131,9 +139,18 @@ impl IpcServer {
                     let hub = self.interaction_hub.clone();
                     let policy = self.policy_engine.clone();
                     let tmpl_mgr = self.template_mgr.clone();
+                    let notify_handle = self.notification_handle.clone();
                     tokio::spawn(async move {
                         if let Err(e) = handle_connection(
-                            stream, mgr, acct_mgr, proj_reg, hub, policy, tmpl_mgr, evt_tx,
+                            stream,
+                            mgr,
+                            acct_mgr,
+                            proj_reg,
+                            hub,
+                            policy,
+                            tmpl_mgr,
+                            notify_handle,
+                            evt_tx,
                         )
                         .await
                         {
@@ -203,6 +220,7 @@ pub fn is_mutating_cmd(cmd: &str) -> bool {
             | "policy.update"
             | "policy.remove"
             | "policy.delete"
+            | "notification.test"
     )
 }
 
@@ -325,6 +343,32 @@ pub async fn dispatch_request_ext(
     template_mgr: &Option<TemplateManagerHandle>,
     token_scope: Option<TokenScope>,
 ) -> ApiResponse {
+    dispatch_request_full(
+        req,
+        session_mgr,
+        account_mgr,
+        project_registry,
+        interaction_hub,
+        policy_engine,
+        template_mgr,
+        None,
+        token_scope,
+    )
+    .await
+}
+
+/// Unified command dispatcher with template manager and notification handle support.
+pub async fn dispatch_request_full(
+    req: &ApiRequest,
+    session_mgr: &SessionManagerHandle,
+    account_mgr: &Option<AccountManagerHandle>,
+    project_registry: &Option<ProjectRegistryHandle>,
+    interaction_hub: &Option<InteractionHubHandle>,
+    policy_engine: &Option<PolicyEngineHandle>,
+    template_mgr: &Option<TemplateManagerHandle>,
+    notification_handle: Option<&NotificationHandle>,
+    token_scope: Option<TokenScope>,
+) -> ApiResponse {
     if req.v != 1 {
         return ApiResponse::err(
             &req.id,
@@ -367,6 +411,7 @@ pub async fn dispatch_request_ext(
         "interaction" => handle_interaction_cmd(req, session_mgr, interaction_hub).await,
         "policy" => handle_policy_cmd(req, policy_engine, interaction_hub).await,
         "audit" => handle_audit_cmd(req, policy_engine, interaction_hub).await,
+        "notification" => handle_notification_cmd(req, notification_handle).await,
         "events" => {
             if req.cmd == "events.query" {
                 let sid = req.params["session_id"].as_str().map(Id::from);
@@ -416,6 +461,57 @@ pub async fn dispatch_request_ext(
     }
 }
 
+async fn handle_notification_cmd(
+    req: &ApiRequest,
+    notification_handle: Option<&NotificationHandle>,
+) -> ApiResponse {
+    match req.cmd.as_str() {
+        "notification.status" => {
+            let report = match notification_handle {
+                Some(h) => h.status(),
+                None => NotificationStatusReport {
+                    enabled: false,
+                    desktop: false,
+                    discord_configured: false,
+                    slack_configured: false,
+                    generic_webhooks_count: 0,
+                    events: Vec::new(),
+                    metrics: crate::notifications::NotificationMetrics::default(),
+                },
+            };
+            ApiResponse::ok(&req.id, json!({ "status": report }))
+        }
+        "notification.test" => {
+            let h = match notification_handle {
+                Some(h) => h,
+                None => {
+                    return ApiResponse::err(
+                        &req.id,
+                        "Unavailable",
+                        "Notification subsystem is not initialized or configured",
+                    );
+                }
+            };
+            let channel = req
+                .params
+                .get("channel")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let message = req
+                .params
+                .get("message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            match h.send_test(channel, message).await {
+                Ok(results) => ApiResponse::ok(&req.id, json!({ "test_results": results })),
+                Err(e) => ApiResponse::err(&req.id, "NotificationError", e.to_string()),
+            }
+        }
+        other => ApiResponse::err(&req.id, "NotFound", format!("Unknown command: {other}")),
+    }
+}
+
 async fn handle_connection(
     stream: UnixStream,
     session_mgr: SessionManagerHandle,
@@ -424,6 +520,7 @@ async fn handle_connection(
     interaction_hub: Option<InteractionHubHandle>,
     policy_engine: Option<PolicyEngineHandle>,
     template_mgr: Option<TemplateManagerHandle>,
+    notification_handle: Option<NotificationHandle>,
     event_tx: broadcast::Sender<AgentEvent>,
 ) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
@@ -510,7 +607,7 @@ async fn handle_connection(
             return Ok(());
         }
 
-        let resp = dispatch_request_ext(
+        let resp = dispatch_request_full(
             &req,
             &session_mgr,
             &account_mgr,
@@ -518,6 +615,7 @@ async fn handle_connection(
             &interaction_hub,
             &policy_engine,
             &template_mgr,
+            notification_handle.as_ref(),
             None,
         )
         .await;
@@ -2072,5 +2170,259 @@ fn classify_error(e: &anyhow::Error) -> &'static str {
         "InvalidState"
     } else {
         "InternalError"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::NotificationConfig;
+    use crate::notifications::NotificationDispatcher;
+    use serde_json::json;
+
+    fn dummy_session_mgr() -> SessionManagerHandle {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        SessionManagerHandle::new(tx)
+    }
+
+    #[test]
+    fn test_is_mutating_cmd_notifications() {
+        assert!(is_mutating_cmd("notification.test"));
+        assert!(!is_mutating_cmd("notification.status"));
+    }
+
+    #[tokio::test]
+    async fn test_notification_status_no_handle() {
+        let mgr = dummy_session_mgr();
+        let req = ApiRequest {
+            v: 1,
+            id: "test-1".into(),
+            cmd: "notification.status".into(),
+            params: json!({}),
+        };
+        let resp = dispatch_request_full(
+            &req, &mgr, &None, &None, &None, &None, &None, None, None,
+        )
+        .await;
+        assert!(resp.ok);
+        assert_eq!(resp.id, "test-1");
+        let result = resp.result.as_ref().unwrap();
+        let status = &result["status"];
+        assert_eq!(status["enabled"], false);
+        assert_eq!(status["desktop"], false);
+        assert_eq!(status["discord_configured"], false);
+        assert_eq!(status["slack_configured"], false);
+        assert_eq!(status["generic_webhooks_count"], 0);
+    }
+
+    #[tokio::test]
+    async fn test_notification_status_with_handle() {
+        let mgr = dummy_session_mgr();
+        let config = NotificationConfig {
+            enabled: true,
+            discord_webhook_url: Some("https://discord.com/api/webhooks/dummy".to_string()),
+            slack_webhook_url: None,
+            generic_webhook_urls: vec!["https://example.com/webhook".to_string()],
+            desktop_notifications: true,
+            events: vec!["session_crashed".to_string(), "quota_exhausted".to_string()],
+            timeout_ms: 3000,
+            max_retries: 1,
+        };
+        let dispatcher = NotificationDispatcher::new(config, reqwest::Client::new());
+        let handle = dispatcher.handle();
+
+        let req = ApiRequest {
+            v: 1,
+            id: "test-2".into(),
+            cmd: "notification.status".into(),
+            params: json!({}),
+        };
+        let resp = dispatch_request_full(
+            &req,
+            &mgr,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            Some(&handle),
+            None,
+        )
+        .await;
+        assert!(resp.ok);
+        assert_eq!(resp.id, "test-2");
+        let result = resp.result.as_ref().unwrap();
+        let status = &result["status"];
+        assert_eq!(status["enabled"], true);
+        assert_eq!(status["desktop"], true);
+        assert_eq!(status["discord_configured"], true);
+        assert_eq!(status["slack_configured"], false);
+        assert_eq!(status["generic_webhooks_count"], 1);
+        assert_eq!(status["events"], json!(["session_crashed", "quota_exhausted"]));
+    }
+
+    #[tokio::test]
+    async fn test_notification_test_no_handle() {
+        let mgr = dummy_session_mgr();
+        let req = ApiRequest {
+            v: 1,
+            id: "test-3".into(),
+            cmd: "notification.test".into(),
+            params: json!({}),
+        };
+        let resp = dispatch_request_full(
+            &req, &mgr, &None, &None, &None, &None, &None, None, None,
+        )
+        .await;
+        assert!(!resp.ok);
+        assert_eq!(resp.error.as_ref().unwrap().code, "Unavailable");
+    }
+
+    #[tokio::test]
+    async fn test_notification_test_with_handle_unknown_channel() {
+        let mgr = dummy_session_mgr();
+        let config = NotificationConfig::default();
+        let dispatcher = NotificationDispatcher::new(config, reqwest::Client::new());
+        let handle = dispatcher.handle();
+
+        let req = ApiRequest {
+            v: 1,
+            id: "test-4".into(),
+            cmd: "notification.test".into(),
+            params: json!({ "channel": "pagerduty", "message": "hello" }),
+        };
+        let resp = dispatch_request_full(
+            &req,
+            &mgr,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            Some(&handle),
+            None,
+        )
+        .await;
+        assert!(!resp.ok);
+        assert_eq!(resp.error.as_ref().unwrap().code, "NotificationError");
+    }
+
+    #[tokio::test]
+    async fn test_notification_test_with_handle_valid_channel() {
+        let mgr = dummy_session_mgr();
+        let config = NotificationConfig {
+            enabled: true,
+            desktop_notifications: false,
+            ..Default::default()
+        };
+        let dispatcher = NotificationDispatcher::new(config, reqwest::Client::new());
+        let handle = dispatcher.handle();
+
+        let req = ApiRequest {
+            v: 1,
+            id: "test-5".into(),
+            cmd: "notification.test".into(),
+            params: json!({ "channel": "desktop", "message": "test alert" }),
+        };
+        let resp = dispatch_request_full(
+            &req,
+            &mgr,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            Some(&handle),
+            None,
+        )
+        .await;
+        assert!(resp.ok);
+        let result = resp.result.as_ref().unwrap();
+        let channels = result["test_results"]["channels"].as_array().unwrap();
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0]["channel"], "desktop");
+        assert_eq!(channels[0]["status"], "skipped");
+    }
+
+    #[tokio::test]
+    async fn test_token_scope_enforcement_for_notifications() {
+        let mgr = dummy_session_mgr();
+        let config = NotificationConfig::default();
+        let dispatcher = NotificationDispatcher::new(config, reqwest::Client::new());
+        let handle = dispatcher.handle();
+
+        // 1. Read token: notification.status allowed
+        let req_status = ApiRequest {
+            v: 1,
+            id: "test-scope-1".into(),
+            cmd: "notification.status".into(),
+            params: json!({}),
+        };
+        let resp_status = dispatch_request_full(
+            &req_status,
+            &mgr,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            Some(&handle),
+            Some(TokenScope::Read),
+        )
+        .await;
+        assert!(resp_status.ok);
+
+        // 2. Read token: notification.test rejected as mutating
+        let req_test = ApiRequest {
+            v: 1,
+            id: "test-scope-2".into(),
+            cmd: "notification.test".into(),
+            params: json!({}),
+        };
+        let resp_test = dispatch_request_full(
+            &req_test,
+            &mgr,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            Some(&handle),
+            Some(TokenScope::Read),
+        )
+        .await;
+        assert!(!resp_test.ok);
+        assert_eq!(resp_test.error.as_ref().unwrap().code, "PermissionDenied");
+
+        // 3. Write token: notification.test allowed past scope check
+        let resp_write = dispatch_request_full(
+            &req_test,
+            &mgr,
+            &None,
+            &None,
+            &None,
+            &None,
+            &None,
+            Some(&handle),
+            Some(TokenScope::Write),
+        )
+        .await;
+        assert!(resp_write.ok);
+    }
+
+    #[tokio::test]
+    async fn test_ipc_server_builder_with_notification_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock_path = dir.path().join("test.sock");
+        let mgr = dummy_session_mgr();
+        let (evt_tx, _) = tokio::sync::broadcast::channel(16);
+        let config = NotificationConfig::default();
+        let dispatcher = NotificationDispatcher::new(config, reqwest::Client::new());
+        let handle = dispatcher.handle();
+
+        let server = IpcServer::bind(&sock_path, mgr, evt_tx)
+            .unwrap()
+            .with_notification_handle(handle);
+        assert!(server.notification_handle.is_some());
     }
 }

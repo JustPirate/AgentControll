@@ -16,6 +16,7 @@ pub mod event_store;
 pub mod interaction_hub;
 pub mod ipc;
 pub mod metrics;
+pub mod notifications;
 pub mod policy_engine;
 pub mod project_registry;
 pub mod session;
@@ -25,5 +26,9 @@ pub mod theme;
 pub mod types;
 pub mod ws;
 
+pub use notifications::{
+    ChannelTestResult, NotificationDispatcher, NotificationHandle, NotificationMetrics,
+    NotificationStatusReport, NotificationTestResult,
+};
 pub use template_manager::{TemplateManager, TemplateManagerHandle, TemplateStore};
 

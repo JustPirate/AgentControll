@@ -80,6 +80,9 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// External notification and webhook management (Feature F8).
+    #[command(subcommand, alias = "notify")]
+    Notification(NotificationCmd),
     /// Daemon status.
     Status,
     /// Log in to an account (e.g. Antigravity / Google).
@@ -104,6 +107,22 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+}
+
+/// External notification and webhook management subcommands (Feature F8).
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+enum NotificationCmd {
+    /// Dispatch a test notification to configured webhooks and desktop alerts.
+    Test {
+        /// Specific channel to test (discord, slack, generic, desktop, or all).
+        #[arg(short, long)]
+        channel: Option<String>,
+        /// Custom message body for the test notification.
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// Inspect notification configuration and delivery metrics.
+    Status,
 }
 
 /// Conversation inspection and discovery subcommands.
@@ -771,6 +790,16 @@ fn build_request(commands: &Commands) -> Result<(String, serde_json::Value)> {
     let (cmd, params) = match commands {
         Commands::Status => ("daemon.status".to_owned(), json!({})),
         Commands::Metrics { .. } => ("metrics.get".to_owned(), json!({})),
+        Commands::Notification(n) => match n {
+            NotificationCmd::Status => ("notification.status".to_owned(), json!({})),
+            NotificationCmd::Test { channel, message } => (
+                "notification.test".to_owned(),
+                json!({
+                    "channel": channel,
+                    "message": message,
+                }),
+            ),
+        },
         Commands::Tui | Commands::Dashboard | Commands::Login { .. } | Commands::Doctor { .. } => {
             unreachable!()
         }
@@ -1643,6 +1672,23 @@ fn print_response(resp: &ApiResponse, plain: bool) {
                 }
                 return;
             }
+            // Notification status (Feature F8)
+            if let Some(status) = result.get("status").and_then(|s| s.as_object()) {
+                if status.contains_key("discord_configured") || status.contains_key("metrics") {
+                    print!("{}", render_notification_status(status, plain));
+                    return;
+                }
+            }
+            // Notification test results (Feature F8)
+            if let Some(test_results) = result.get("test_results").and_then(|t| t.as_object()) {
+                let channels = test_results
+                    .get("channels")
+                    .and_then(|c| c.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                print!("{}", render_notification_test(&channels, plain));
+                return;
+            }
             println!(
                 "{}",
                 serde_json::to_string_pretty(result).unwrap_or_default()
@@ -1652,5 +1698,291 @@ fn print_response(resp: &ApiResponse, plain: bool) {
         }
     } else if let Some(err) = &resp.error {
         eprintln!("Error [{}]: {}", err.code, err.message);
+    }
+}
+
+fn render_notification_status(
+    status: &serde_json::Map<String, serde_json::Value>,
+    plain: bool,
+) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let enabled = status.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let desktop = status.get("desktop").and_then(|v| v.as_bool()).unwrap_or(false);
+    let discord = status.get("discord_configured").and_then(|v| v.as_bool()).unwrap_or(false);
+    let slack = status.get("slack_configured").and_then(|v| v.as_bool()).unwrap_or(false);
+    let generic_count = status.get("generic_webhooks_count").and_then(|v| v.as_u64()).unwrap_or(0);
+    let events: Vec<String> = status
+        .get("events")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|e| e.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    let events_str = if events.is_empty() {
+        "none".to_string()
+    } else {
+        events.join(", ")
+    };
+
+    let metrics = status.get("metrics");
+    let total_dispatched = metrics.and_then(|m| m.get("total_dispatched")).and_then(|v| v.as_u64()).unwrap_or(0);
+    let successful = metrics.and_then(|m| m.get("successful")).and_then(|v| v.as_u64()).unwrap_or(0);
+    let failed = metrics.and_then(|m| m.get("failed")).and_then(|v| v.as_u64()).unwrap_or(0);
+    let last_success = metrics.and_then(|m| m.get("last_success")).and_then(|v| v.as_str()).unwrap_or("Never");
+    let last_error = metrics.and_then(|m| m.get("last_error")).and_then(|v| v.as_str()).unwrap_or("None");
+
+    if plain {
+        let _ = writeln!(out, "enabled\t{}", enabled);
+        let _ = writeln!(out, "desktop\t{}", desktop);
+        let _ = writeln!(out, "discord_configured\t{}", discord);
+        let _ = writeln!(out, "slack_configured\t{}", slack);
+        let _ = writeln!(out, "generic_webhooks_count\t{}", generic_count);
+        let _ = writeln!(out, "events\t{}", events_str);
+        let _ = writeln!(out, "total_dispatched\t{}", total_dispatched);
+        let _ = writeln!(out, "successful\t{}", successful);
+        let _ = writeln!(out, "failed\t{}", failed);
+        let _ = writeln!(out, "last_success\t{}", last_success);
+        let _ = writeln!(out, "last_error\t{}", last_error);
+        return out;
+    }
+
+    let _ = writeln!(out, "Notification Configuration:");
+    let _ = writeln!(out, "  Enabled:                {}", if enabled { "ENABLED" } else { "DISABLED" });
+    let _ = writeln!(out, "  Desktop Notifications:  {}", if desktop { "ENABLED" } else { "DISABLED" });
+    let _ = writeln!(out, "  Discord Webhook:        {}", if discord { "Configured" } else { "Not configured" });
+    let _ = writeln!(out, "  Slack Webhook:          {}", if slack { "Configured" } else { "Not configured" });
+    let _ = writeln!(out, "  Generic Webhooks:       {} configured", generic_count);
+    let _ = writeln!(out, "  Events:                 {}", events_str);
+    let _ = writeln!(out);
+    let _ = writeln!(out, "Delivery Metrics:");
+    let _ = writeln!(out, "  Total Dispatched:       {}", total_dispatched);
+    let _ = writeln!(out, "  Successful:             {}", successful);
+    let _ = writeln!(out, "  Failed:                 {}", failed);
+    let _ = writeln!(out, "  Last Success:           {}", last_success);
+    let _ = writeln!(out, "  Last Error:             {}", last_error);
+    out
+}
+
+fn render_notification_test(channels: &[serde_json::Value], plain: bool) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    if channels.is_empty() {
+        if !plain {
+            out.push_str("No notification channels tested.\n");
+        }
+        return out;
+    }
+
+    if plain {
+        for ch in channels {
+            let channel = ch.get("channel").and_then(|v| v.as_str()).unwrap_or("?");
+            let raw_status = ch.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+            let status_display = match raw_status.to_ascii_lowercase().as_str() {
+                "success" => "SUCCESS",
+                "failed" => "FAILED",
+                "skipped" | "not_configured" => "NOT_CONFIGURED",
+                _ => raw_status,
+            };
+            let details = ch.get("details").and_then(|v| v.as_str()).unwrap_or("-");
+            let _ = writeln!(out, "{}\t{}\t{}", channel, status_display, details);
+        }
+        return out;
+    }
+
+    let _ = writeln!(out, "{:<14}  {:<16}  {}", "CHANNEL", "STATUS", "DETAILS");
+    let _ = writeln!(out, "{}", "-".repeat(80));
+    for ch in channels {
+        let channel = ch.get("channel").and_then(|v| v.as_str()).unwrap_or("?");
+        let raw_status = ch.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+        let status_display = match raw_status.to_ascii_lowercase().as_str() {
+            "success" => "SUCCESS",
+            "failed" => "FAILED",
+            "skipped" | "not_configured" => "NOT_CONFIGURED",
+            _ => raw_status,
+        };
+        let details = ch.get("details").and_then(|v| v.as_str()).unwrap_or("-");
+        let _ = writeln!(out, "{:<14}  {:<16}  {}", channel, status_display, details);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn test_cli_parse_notification_status() {
+        let cli = Cli::try_parse_from(["ac", "notification", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Notification(NotificationCmd::Status)
+        ));
+    }
+
+    #[test]
+    fn test_cli_parse_notify_alias_status() {
+        let cli = Cli::try_parse_from(["ac", "notify", "status"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Notification(NotificationCmd::Status)
+        ));
+    }
+
+    #[test]
+    fn test_cli_parse_notification_test_defaults() {
+        let cli = Cli::try_parse_from(["ac", "notification", "test"]).unwrap();
+        match cli.command {
+            Commands::Notification(NotificationCmd::Test { channel, message }) => {
+                assert_eq!(channel, None);
+                assert_eq!(message, None);
+            }
+            _ => panic!("Expected NotificationCmd::Test"),
+        }
+    }
+
+    #[test]
+    fn test_cli_parse_notify_alias_test_with_args() {
+        let cli = Cli::try_parse_from([
+            "ac", "notify", "test", "-c", "discord", "-m", "Alert test",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Notification(NotificationCmd::Test { channel, message }) => {
+                assert_eq!(channel, Some("discord".to_string()));
+                assert_eq!(message, Some("Alert test".to_string()));
+            }
+            _ => panic!("Expected NotificationCmd::Test"),
+        }
+
+        let cli2 = Cli::try_parse_from([
+            "ac", "notify", "test", "--channel", "slack", "--message", "Long message",
+        ])
+        .unwrap();
+        match cli2.command {
+            Commands::Notification(NotificationCmd::Test { channel, message }) => {
+                assert_eq!(channel, Some("slack".to_string()));
+                assert_eq!(message, Some("Long message".to_string()));
+            }
+            _ => panic!("Expected NotificationCmd::Test"),
+        }
+    }
+
+    #[test]
+    fn test_build_request_notification_status() {
+        let cmd = Commands::Notification(NotificationCmd::Status);
+        let (name, params) = build_request(&cmd).unwrap();
+        assert_eq!(name, "notification.status");
+        assert_eq!(params, json!({}));
+    }
+
+    #[test]
+    fn test_build_request_notification_test() {
+        let cmd = Commands::Notification(NotificationCmd::Test {
+            channel: Some("generic".to_string()),
+            message: Some("hello generic".to_string()),
+        });
+        let (name, params) = build_request(&cmd).unwrap();
+        assert_eq!(name, "notification.test");
+        assert_eq!(
+            params,
+            json!({
+                "channel": "generic",
+                "message": "hello generic"
+            })
+        );
+
+        let cmd_none = Commands::Notification(NotificationCmd::Test {
+            channel: None,
+            message: None,
+        });
+        let (name2, params2) = build_request(&cmd_none).unwrap();
+        assert_eq!(name2, "notification.test");
+        assert_eq!(
+            params2,
+            json!({
+                "channel": null,
+                "message": null
+            })
+        );
+    }
+
+    #[test]
+    fn test_render_notification_status_pretty_and_plain() {
+        let report = json!({
+            "enabled": true,
+            "desktop": false,
+            "discord_configured": true,
+            "slack_configured": false,
+            "generic_webhooks_count": 2,
+            "events": ["session_crashed", "session_finished"],
+            "metrics": {
+                "total_dispatched": 10,
+                "successful": 9,
+                "failed": 1,
+                "last_success": "2026-11-18T10:00:00Z",
+                "last_error": "HTTP 500"
+            }
+        });
+        let map = report.as_object().unwrap();
+
+        let pretty = render_notification_status(map, false);
+        assert!(pretty.contains("Notification Configuration:"));
+        assert!(pretty.contains("Enabled:                ENABLED"));
+        assert!(pretty.contains("Desktop Notifications:  DISABLED"));
+        assert!(pretty.contains("Discord Webhook:        Configured"));
+        assert!(pretty.contains("Slack Webhook:          Not configured"));
+        assert!(pretty.contains("Generic Webhooks:       2 configured"));
+        assert!(pretty.contains("Events:                 session_crashed, session_finished"));
+        assert!(pretty.contains("Delivery Metrics:"));
+        assert!(pretty.contains("Total Dispatched:       10"));
+        assert!(pretty.contains("Successful:             9"));
+        assert!(pretty.contains("Failed:                 1"));
+        assert!(pretty.contains("Last Success:           2026-11-18T10:00:00Z"));
+        assert!(pretty.contains("Last Error:             HTTP 500"));
+
+        let plain = render_notification_status(map, true);
+        assert!(plain.contains("enabled\ttrue\n"));
+        assert!(plain.contains("desktop\tfalse\n"));
+        assert!(plain.contains("discord_configured\ttrue\n"));
+        assert!(plain.contains("slack_configured\tfalse\n"));
+        assert!(plain.contains("generic_webhooks_count\t2\n"));
+        assert!(plain.contains("events\tsession_crashed, session_finished\n"));
+        assert!(plain.contains("total_dispatched\t10\n"));
+        assert!(plain.contains("successful\t9\n"));
+        assert!(plain.contains("failed\t1\n"));
+        assert!(plain.contains("last_success\t2026-11-18T10:00:00Z\n"));
+        assert!(plain.contains("last_error\tHTTP 500\n"));
+    }
+
+    #[test]
+    fn test_render_notification_test_pretty_and_plain() {
+        let channels = vec![
+            json!({
+                "channel": "discord",
+                "status": "success",
+                "details": "HTTP 204 No Content"
+            }),
+            json!({
+                "channel": "slack",
+                "status": "skipped",
+                "details": "Slack webhook URL not configured"
+            }),
+            json!({
+                "channel": "desktop",
+                "status": "failed",
+                "details": "notify-send exited with code 1"
+            }),
+        ];
+
+        let pretty = render_notification_test(&channels, false);
+        assert!(pretty.contains("CHANNEL         STATUS            DETAILS"));
+        assert!(pretty.contains("discord         SUCCESS           HTTP 204 No Content"));
+        assert!(pretty.contains("slack           NOT_CONFIGURED    Slack webhook URL not configured"));
+        assert!(pretty.contains("desktop         FAILED            notify-send exited with code 1"));
+
+        let plain = render_notification_test(&channels, true);
+        assert!(plain.contains("discord\tSUCCESS\tHTTP 204 No Content\n"));
+        assert!(plain.contains("slack\tNOT_CONFIGURED\tSlack webhook URL not configured\n"));
+        assert!(plain.contains("desktop\tFAILED\tnotify-send exited with code 1\n"));
     }
 }

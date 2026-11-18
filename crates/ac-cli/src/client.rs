@@ -670,4 +670,133 @@ impl DaemonClient {
         }
         resp.result.context("Missing result in metrics.get response")
     }
+
+    /// Retrieve notification configuration and delivery metrics (Feature F8).
+    pub async fn notification_status(&self) -> Result<ApiResponse> {
+        self.send_command("notification.status", json!({})).await
+    }
+
+    /// Trigger test notification across configured channels (Feature F8).
+    pub async fn notification_test(
+        &self,
+        channel: Option<&str>,
+        message: Option<&str>,
+    ) -> Result<ApiResponse> {
+        self.send_command(
+            "notification.test",
+            json!({
+                "channel": channel,
+                "message": message,
+            }),
+        )
+        .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    use tokio::net::UnixListener;
+
+    #[tokio::test]
+    async fn test_daemon_client_notification_status() {
+        let dir = tempdir().unwrap();
+        let sock_path = dir.path().join("test.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let client = DaemonClient::new(sock_path.clone());
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let reader = BufReader::new(read_half);
+            let mut lines = reader.lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ApiRequest = serde_json::from_str(&line).unwrap();
+            assert_eq!(req.cmd, "notification.status");
+            assert_eq!(req.params, json!({}));
+
+            let resp = ApiResponse::ok(
+                &req.id,
+                json!({
+                    "status": {
+                        "enabled": true,
+                        "desktop": false,
+                        "discord_configured": true,
+                        "slack_configured": false,
+                        "generic_webhooks_count": 1,
+                        "events": ["session_crashed"],
+                        "metrics": {
+                            "total_dispatched": 5,
+                            "successful": 5,
+                            "failed": 0,
+                            "last_success": null,
+                            "last_failure": null,
+                            "last_error": null
+                        }
+                    }
+                }),
+            );
+            let mut resp_str = serde_json::to_string(&resp).unwrap();
+            resp_str.push('\n');
+            write_half.write_all(resp_str.as_bytes()).await.unwrap();
+        });
+
+        let resp = client.notification_status().await.unwrap();
+        assert!(resp.ok);
+        let res = resp.result.unwrap();
+        assert_eq!(res["status"]["enabled"], true);
+        assert_eq!(res["status"]["generic_webhooks_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn test_daemon_client_notification_test() {
+        let dir = tempdir().unwrap();
+        let sock_path = dir.path().join("test_test.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+
+        let client = DaemonClient::new(sock_path.clone());
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let reader = BufReader::new(read_half);
+            let mut lines = reader.lines();
+            let line = lines.next_line().await.unwrap().unwrap();
+            let req: ApiRequest = serde_json::from_str(&line).unwrap();
+            assert_eq!(req.cmd, "notification.test");
+            assert_eq!(req.params["channel"], "discord");
+            assert_eq!(req.params["message"], "test dispatch");
+
+            let resp = ApiResponse::ok(
+                &req.id,
+                json!({
+                    "test_results": {
+                        "channels": [
+                            {
+                                "channel": "discord",
+                                "status": "success",
+                                "details": "HTTP 204 No Content"
+                            }
+                        ]
+                    }
+                }),
+            );
+            let mut resp_str = serde_json::to_string(&resp).unwrap();
+            resp_str.push('\n');
+            write_half.write_all(resp_str.as_bytes()).await.unwrap();
+        });
+
+        let resp = client
+            .notification_test(Some("discord"), Some("test dispatch"))
+            .await
+            .unwrap();
+        assert!(resp.ok);
+        let res = resp.result.unwrap();
+        let channels = res["test_results"]["channels"].as_array().unwrap();
+        assert_eq!(channels.len(), 1);
+        assert_eq!(channels[0]["channel"], "discord");
+        assert_eq!(channels[0]["status"], "success");
+    }
 }
