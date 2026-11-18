@@ -11,9 +11,10 @@ This roadmap documents future initiatives, planned enhancements, and architectur
 - Launch standardized sessions with a single command or hotkey.
 - **Status**: Completed (v1.1.0) — Delivered persistent SQLite storage (`templates.db`), IPC & WebSocket APIs (`template.create`, `template.list`, `template.get`, `template.delete`, `session.create_from_template`), CLI subcommands (`ac template <list|create|get|delete|run>` and `ac session run --template`), and interactive TUI template selector in the New Session modal.
 
-### 2. Claude Code Multi-Account Isolation
+### 2. Claude Code Multi-Account Isolation [Completed]
 - Extend per-account home directory isolation (`~/.config/agentcontrol/profiles/<account-id>/`) from Antigravity to Claude Code.
 - Manage multiple Anthropic API keys and credential profiles concurrently without environment bleed.
+- **Status**: Completed (v1.1.0) — Delivered isolated profile directory management with strict 0700/0600 permissions, D-Bus session bus disabling (`DBUS_SESSION_BUS_ADDRESS="disabled:"`), ambient credential wiping (`AMBIENT_AUTH_ENV`), credential storage routing, and dedicated integration test suite (`claude_multi_account_tests.rs`).
 
 ### 3. Native Metrics & OpenTelemetry Export
 - Expose Prometheus `/metrics` endpoint or OTLP stream over the local daemon.
@@ -51,7 +52,7 @@ This roadmap documents future initiatives, planned enhancements, and architectur
 | Initiative | Target Milestone | Complexity | Tracking Reference |
 |:---|:---|:---|:---|
 | Reusable Session Presets | v1.1.0 (Completed) | Low | F10 |
-| Claude Multi-Account Sandbox | v1.1.0 | Medium | ADR-014 |
+| Claude Multi-Account Sandbox | v1.1.0 (Completed) | Medium | ADR-014 |
 | OpenTelemetry Metrics Exporter | v1.1.0 | Medium | F12 |
 | Linux Landlock Sandboxing | v1.2.0 | High | F4 |
 | Webhook Alert Dispatcher | v1.2.0 | Low | F8 |

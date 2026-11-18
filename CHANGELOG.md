@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Claude Code Multi-Account Isolation (ADR-014)**: Full per-account profile and credential isolation for Claude Code sessions.
+  - **Isolated Profile Environments**: Created isolated profile directories under `~/.config/agentcontrol/profiles/<account-id>/` with restricted filesystem permissions (`0700` directories, `0600` config files), private `.claude` directories, and symlinked developer tooling excluding configuration targets (`crates/ac-core/src/adapter/claude.rs`).
+  - **Keyring & D-Bus Disconnection**: Enforced `DBUS_SESSION_BUS_ADDRESS="disabled:"` across child processes to isolate Claude CLI / keytar from host desktop keyrings (GNOME Keyring / KWallet).
+  - **Ambient Credential Wiping**: Automatically stripped ambient authentication environment variables (`ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_API_KEY`, etc.) preventing host environment credential leakage.
+  - **Anthropic Credential Routing**: Added support for storing and resolving Anthropic API keys (`apiKey`) and raw secrets through `credentials.rs`, injecting them safely into child process environment and isolated `~/.claude.json`.
+  - **Integration Testing**: Authored comprehensive test suite `claude_multi_account_tests.rs` verifying account registration, zero-bleed process isolation, concurrent multi-account execution, and profile cleanup.
 - **Reusable Session Templates & Presets (F10)**: End-to-end framework for saving, managing, and instantiating standardized agent configurations across core daemon, IPC, CLI, and TUI.
   - **Persistent SQLite Storage & Manager**: Added `TemplateStore` and `TemplateManager` with WAL mode (`templates.db`), providing slug-validated CRUD operations, unique name constraints, and in-memory caching (`crates/ac-core/src/template_manager.rs`).
   - **IPC & WebSocket Template API**: Introduced `template.create`, `template.list`, `template.get`, `template.delete` / `template.remove`, `template.update`, and `session.create_from_template` endpoints with token scope enforcement (`crates/ac-core/src/ipc.rs`, `crates/ac-core/src/ws.rs`).

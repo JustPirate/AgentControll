@@ -354,12 +354,14 @@ struct LegacyCredentialFile {
 }
 
 /// Parse a credential reference `ref:<provider>:<id>` into the file path.
-/// Accepts the canonical `agy` provider and the legacy `antigravity` provider.
+/// Accepts the canonical `agy` provider, legacy `antigravity`, and `claude`/`anthropic` providers.
 pub fn credential_path(cred_ref: &str) -> Option<PathBuf> {
     let (prefix, id) = cred_ref.strip_prefix("ref:")?.split_once(':')?;
-    if !matches!(prefix, "agy" | "antigravity")
+    if !matches!(prefix, "agy" | "antigravity" | "claude" | "anthropic")
         || id.is_empty()
-        || !id.chars().all(|c| c.is_ascii_alphanumeric())
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
     {
         return None;
     }
@@ -704,7 +706,7 @@ pub fn stage_account_removal(account_id: &Id, cred_ref: &str) -> AuthResult<Remo
     ));
     let mut staging = RemovalStaging::default();
     let mut targets = vec![profile_dir(account_id)?];
-    if let Some(p) = credential_path(cred_ref) {
+    if let Some(p) = credential_path(cred_ref).or_else(|| crate::credentials::credential_path(cred_ref)) {
         targets.push(p);
     }
     for src in targets {
@@ -1614,8 +1616,10 @@ mod tests {
     fn credential_refs_are_strict() {
         assert!(credential_path("ref:agy:01ABC").is_some());
         assert!(credential_path("ref:antigravity:01ABC").is_some());
+        assert!(credential_path("ref:claude:01ABC").is_some());
+        assert!(credential_path("ref:anthropic:01ABC").is_some());
         assert!(credential_path("ref:agy:../../etc").is_none());
-        assert!(credential_path("ref:claude:01ABC").is_none());
+        assert!(credential_path("ref:unknown:01ABC").is_none());
         assert!(credential_path("plain").is_none());
     }
 

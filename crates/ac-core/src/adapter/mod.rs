@@ -129,6 +129,7 @@ impl AdapterFactory for CompositeAdapterFactory {
     fn preflight(&self, ctx: &SessionContext) -> Result<()> {
         match ctx.agent_type.as_str() {
             "agy" | "antigravity" => Self::preflight_agy(ctx),
+            "claude-code" | "claude" => Self::preflight_claude(ctx),
             _ => Ok(()),
         }
     }
@@ -261,6 +262,10 @@ impl CompositeAdapterFactory {
             crate::agy_discovery::link_conversation_to_profile(aid, cid, None)?;
         }
         Ok(())
+    }
+
+    fn preflight_claude(ctx: &SessionContext) -> Result<()> {
+        claude::ClaudeAdapter::preflight(ctx)
     }
 }
 

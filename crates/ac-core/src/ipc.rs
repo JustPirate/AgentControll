@@ -936,8 +936,11 @@ async fn remove_account(
         );
     }
 
-    let is_agy = account.provider == crate::agy_auth::PROVIDER;
-    let mut staging = if is_agy {
+    let is_isolated = matches!(
+        account.provider.as_str(),
+        "agy" | "antigravity" | "claude" | "anthropic"
+    );
+    let mut staging = if is_isolated {
         match crate::agy_auth::stage_account_removal(&aid, &account.credential_ref) {
             Ok(s) => Some(s),
             Err(e) => {

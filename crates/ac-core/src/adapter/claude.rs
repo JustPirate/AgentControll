@@ -11,7 +11,8 @@
 //! translation between Claude events/commands and Agent Control types.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -24,8 +25,141 @@ use tokio::sync::mpsc;
 use crate::adapter::pty::{GenericPtyAdapter, PtyConfig, PtyPatternKind};
 use crate::adapter::AdapterHandle;
 use crate::types::{
-    AccountSwitchMode, AdapterEvent, AgentCommand, Confidence, ProviderCapabilities, SessionContext,
+    AccountSwitchMode, AdapterEvent, AgentCommand, Confidence, Id, ProviderCapabilities,
+    SessionContext,
 };
+
+/// Ambient authentication environment variables for Anthropic / Claude.
+/// These are removed from child processes to prevent credential bleed from the daemon host environment.
+pub const AMBIENT_AUTH_ENV: [&str; 5] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_API_KEY",
+    "ANTHROPIC_SESSION_TOKEN",
+    "CLAUDE_CONFIG_DIR",
+];
+
+pub const AMBIENT_CLAUDE_ENV: [&str; 5] = AMBIENT_AUTH_ENV;
+
+/// Resolve the isolated profile directory for a Claude account (`~/.config/agentcontrol/profiles/<account-id>/`).
+pub fn profile_dir(account_id: &Id) -> Result<PathBuf> {
+    let id = account_id.0.as_str();
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        bail!("Invalid account id '{}'", id);
+    }
+    Ok(crate::agy_auth::profiles_dir().join(id))
+}
+
+pub fn claude_profile_dir(account_id: &Id) -> Result<PathBuf> {
+    profile_dir(account_id)
+}
+
+#[cfg(unix)]
+fn link_entries(src: &Path, dst: &Path, filter: impl Fn(&str) -> bool) {
+    let Ok(entries) = fs::read_dir(src) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(n) = name.to_str() else { continue };
+        if !filter(n) {
+            continue;
+        }
+        let target = dst.join(&name);
+        if target.symlink_metadata().is_err() {
+            let _ = std::os::unix::fs::symlink(entry.path(), &target);
+        }
+    }
+}
+
+/// Prepares the isolated profile directory and environment for Claude Code.
+#[cfg(unix)]
+pub fn prepare_profile(
+    account_id: &Id,
+    cred_ref: Option<&str>,
+) -> Result<HashMap<String, String>> {
+    let home = profile_dir(account_id)?;
+    let claude_dir = home.join(".claude");
+
+    // Ensure private directories with mode 0700
+    fs::create_dir_all(&home)
+        .with_context(|| format!("creating profile dir at {}", home.display()))?;
+    fs::create_dir_all(&claude_dir)
+        .with_context(|| format!("creating .claude dir at {}", claude_dir.display()))?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700))?;
+        fs::set_permissions(&claude_dir, fs::Permissions::from_mode(0o700))?;
+    }
+
+    // Symlink developer tool configuration from real HOME, excluding .claude, .claude.json, and .gemini
+    let real_home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp"));
+    link_entries(&real_home, &home, |n| {
+        n != ".claude" && n != ".claude.json" && n != ".gemini"
+    });
+
+    let mut envs = HashMap::new();
+    for (var, default) in [
+        ("XDG_CONFIG_HOME", ".config"),
+        ("XDG_DATA_HOME", ".local/share"),
+        ("XDG_CACHE_HOME", ".cache"),
+    ] {
+        let v = std::env::var(var)
+            .unwrap_or_else(|_| real_home.join(default).to_string_lossy().into_owned());
+        envs.insert(var.to_string(), v);
+    }
+
+    envs.insert("HOME".into(), home.to_string_lossy().into_owned());
+    envs.insert("AGENTCONTROL_ACCOUNT_ID".into(), account_id.0.clone());
+    envs.insert("CLAUDE_ACCOUNT_ID".into(), account_id.0.clone());
+    // Invalidate D-Bus session bus so Claude CLI / keytar bypasses host desktop keyrings
+    envs.insert("DBUS_SESSION_BUS_ADDRESS".into(), "disabled:".into());
+    envs.insert("CLAUDE_CONFIG_DIR".into(), claude_dir.to_string_lossy().into_owned());
+
+    if let Some(cr) = cred_ref {
+        let key = crate::credentials::resolve_api_key(cr)?;
+        envs.insert("ANTHROPIC_API_KEY".into(), key.clone());
+
+        // Write isolated ~/.claude.json with mode 0600 so both environment and file-based Claude auth work
+        let claude_json = home.join(".claude.json");
+        let content = serde_json::json!({
+            "primaryApiKey": key,
+            "hasCompletedOnboarding": true
+        });
+        fs::write(&claude_json, serde_json::to_string_pretty(&content)?)
+            .with_context(|| format!("writing claude config at {}", claude_json.display()))?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&claude_json, fs::Permissions::from_mode(0o600))?;
+    }
+
+    tracing::info!(
+        "Prepared isolated Claude profile for account {}: HOME={}, profile_dir={}",
+        account_id,
+        home.display(),
+        home.display()
+    );
+
+    Ok(envs)
+}
+
+#[cfg(not(unix))]
+pub fn prepare_profile(
+    _account_id: &Id,
+    _cred_ref: Option<&str>,
+) -> Result<HashMap<String, String>> {
+    bail!("Claude account profiles are only supported on Unix")
+}
+
+pub fn prepare_claude_profile(account_id: &Id, cred_ref: Option<&str>) -> Result<PathBuf> {
+    prepare_profile(account_id, cred_ref)?;
+    profile_dir(account_id)
+}
 
 /// Operating mode for the Claude Code adapter.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -52,7 +186,9 @@ pub struct ClaudeConfig {
 
 impl Default for ClaudeConfig {
     fn default() -> Self {
-        let executable = std::env::var("CLAUDE_CODE_BIN").unwrap_or_else(|_| "claude".into());
+        let executable = std::env::var("CLAUDE_CODE_BIN")
+            .or_else(|_| std::env::var("CLAUDE_BIN"))
+            .unwrap_or_else(|_| "claude".into());
         Self {
             executable,
             args: vec![
@@ -366,6 +502,17 @@ impl ClaudeAdapter {
         )
     }
 
+    /// Validate that a Claude session can be launched without spawning anything.
+    pub fn preflight(ctx: &SessionContext) -> Result<()> {
+        if let Some(ref aid) = ctx.account_id {
+            profile_dir(aid)?;
+        }
+        if let Some(ref cref) = ctx.credential_ref {
+            crate::credentials::validate_credential(cref)?;
+        }
+        Ok(())
+    }
+
     /// Spawns Claude Code inside the assigned workspace according to the configuration.
     pub fn spawn(
         ctx: &SessionContext,
@@ -401,24 +548,29 @@ impl ClaudeAdapter {
             cmd.current_dir(ws);
         }
 
-        // Environment variables
-        for (k, v) in &config.envs {
-            cmd.env(k, v);
+        // Ambient environment variable stripping: prevent daemon host environment bleed
+        for var in &AMBIENT_CLAUDE_ENV {
+            cmd.env_remove(var);
         }
 
-        // Resolve credential ref if available into child environment without leaking
-        if let Some(ref cred_ref) = ctx.credential_ref {
-            // E.g. "env:ANTHROPIC_API_KEY", direct env var name, or key alias
-            let key = if let Some(stripped) = cred_ref.strip_prefix("env:") {
-                std::env::var(stripped).unwrap_or_else(|_| cred_ref.clone())
-            } else if let Ok(val) = std::env::var(cred_ref) {
-                val
-            } else if let Ok(val) = std::env::var("ANTHROPIC_API_KEY") {
-                val
-            } else {
-                cred_ref.clone()
-            };
-            cmd.env("ANTHROPIC_API_KEY", key);
+        // Keyring isolation: neutralize host desktop keyring (GNOME Keyring / KWallet)
+        cmd.env("DBUS_SESSION_BUS_ADDRESS", "disabled:");
+
+        // Per-account profile isolation and credential routing
+        if let Some(ref aid) = ctx.account_id {
+            let profile_envs = prepare_profile(aid, ctx.credential_ref.as_deref())?;
+            for (k, v) in profile_envs {
+                cmd.env(k, v);
+            }
+        } else if let Some(ref cred_ref) = ctx.credential_ref {
+            if let Ok(key) = crate::credentials::resolve_api_key(cred_ref) {
+                cmd.env("ANTHROPIC_API_KEY", key);
+            }
+        }
+
+        // Environment variables from config
+        for (k, v) in &config.envs {
+            cmd.env(k, v);
         }
 
         cmd.stdin(Stdio::piped())
@@ -610,6 +762,26 @@ impl ClaudeAdapter {
                 },
             )?;
 
+        // Strip ambient auth environment to prevent daemon host environment bleed
+        pty_config
+            .env_remove
+            .extend(AMBIENT_CLAUDE_ENV.iter().map(|s| s.to_string()));
+
+        // Keyring isolation: neutralize host desktop keyring (GNOME Keyring / KWallet)
+        pty_config = pty_config.with_env("DBUS_SESSION_BUS_ADDRESS", "disabled:");
+
+        // Per-account profile isolation and credential routing
+        if let Some(ref aid) = ctx.account_id {
+            let profile_envs = prepare_profile(aid, ctx.credential_ref.as_deref())?;
+            for (k, v) in profile_envs {
+                pty_config = pty_config.with_env(k, v);
+            }
+        } else if let Some(ref cred_ref) = ctx.credential_ref {
+            if let Ok(key) = crate::credentials::resolve_api_key(cred_ref) {
+                pty_config = pty_config.with_env("ANTHROPIC_API_KEY", key);
+            }
+        }
+
         for (k, v) in config.envs {
             pty_config = pty_config.with_env(k, v);
         }
@@ -663,6 +835,10 @@ impl Default for ClaudeAdapterFactory {
 impl crate::adapter::AdapterFactory for ClaudeAdapterFactory {
     fn capabilities(&self, _agent_type: &str) -> ProviderCapabilities {
         ClaudeAdapter::capabilities()
+    }
+
+    fn preflight(&self, ctx: &SessionContext) -> Result<()> {
+        ClaudeAdapter::preflight(ctx)
     }
 
     fn create(
@@ -921,5 +1097,25 @@ printf '{"type": "completed", "summary": "Finished task"}\n'
             pwd_output.contains(temp_dir.path().file_name().unwrap().to_str().unwrap()),
             "Claude must execute inside workspace directory"
         );
+    }
+
+
+
+
+
+
+
+    #[test]
+    fn test_claude_profile_dir_validation() {
+        assert!(profile_dir(&Id::from("../bad")).is_err());
+        assert!(profile_dir(&Id::from("")).is_err());
+        assert!(profile_dir(&Id::from("01TESTACCT")).is_ok());
+    }
+
+    #[test]
+    fn test_ambient_claude_env_contains_expected() {
+        assert!(AMBIENT_CLAUDE_ENV.contains(&"ANTHROPIC_API_KEY"));
+        assert!(AMBIENT_CLAUDE_ENV.contains(&"ANTHROPIC_AUTH_TOKEN"));
+        assert!(AMBIENT_CLAUDE_ENV.contains(&"CLAUDE_CONFIG_DIR"));
     }
 }
