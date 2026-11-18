@@ -6,9 +6,9 @@
 [![Rust](https://img.shields.io/badge/Rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
 [![NPM](https://img.shields.io/npm/v/agentcontroll.svg?style=flat&logo=npm)](https://www.npmjs.com/package/agentcontroll)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-brightgreen.svg)]()
-[![Status](https://img.shields.io/badge/Release-v1.0.13-success.svg)](CHANGELOG.md)
+[![Status](https://img.shields.io/badge/Release-v1.1.0-success.svg)](CHANGELOG.md)
 
-> **Status:** Version 1.0.13. See the [release notes](CHANGELOG.md#113---2026-11-17) for this update.
+> **Status:** Version 1.1.0. See the [release notes](CHANGELOG.md#110---2026-11-18) for this update.
 
 ---
 
@@ -139,7 +139,7 @@ AgentControll solves this by operating as a unified local supervisor: it pools a
 
 ### npm / NPX — Recommended
 
-The official npm package [`agentcontroll`](https://www.npmjs.com/package/agentcontroll) (v1.0.13) is the recommended distribution method for Linux and macOS. It requires Node.js (>= 18) and automatically fetches the prebuilt, SHA256-verified binary for your platform.
+The official npm package [`agentcontroll`](https://www.npmjs.com/package/agentcontroll) (v1.1.0) is the recommended distribution method for Linux and macOS. It requires Node.js (>= 18) and automatically fetches the prebuilt, SHA256-verified binary for your platform.
 
 **Run immediately without global installation:**
 ```bash
@@ -185,7 +185,7 @@ You can customize the installation using environment variables:
 curl -fsSL https://raw.githubusercontent.com/JustPirate/AgentControll/main/install.sh | BIN_DIR=/usr/local/bin sh
 
 # Install a specific release version
-curl -fsSL https://raw.githubusercontent.com/JustPirate/AgentControll/main/install.sh | AGENTCONTROL_VERSION=1.0.13 sh
+curl -fsSL https://raw.githubusercontent.com/JustPirate/AgentControll/main/install.sh | AGENTCONTROL_VERSION=1.1.0 sh
 ```
 
 ---
@@ -197,8 +197,8 @@ Download precompiled tarballs and checksums directly from [GitHub Releases](http
 1. Download the archive and checksum for your platform:
    ```bash
 # Example: Linux x86_64
-curl -LO https://github.com/JustPirate/AgentControll/releases/download/v1.0.13/agentcontroll-v1.0.13-x86_64-unknown-linux-gnu.tar.gz
-curl -LO https://github.com/JustPirate/AgentControll/releases/download/v1.0.13/SHA256SUMS
+curl -LO https://github.com/JustPirate/AgentControll/releases/download/v1.1.0/agentcontroll-v1.1.0-x86_64-unknown-linux-gnu.tar.gz
+curl -LO https://github.com/JustPirate/AgentControll/releases/download/v1.1.0/SHA256SUMS
    ```
 
 2. Verify integrity:
@@ -208,13 +208,13 @@ curl -LO https://github.com/JustPirate/AgentControll/releases/download/v1.0.13/S
 
 3. Extract binaries:
    ```bash
-tar -xzf agentcontroll-v1.0.13-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/bin/
+tar -xzf agentcontroll-v1.1.0-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/bin/
    ```
 
 Available release archives:
-- `agentcontroll-v1.0.13-x86_64-unknown-linux-gnu.tar.gz` (Linux x86_64)
-- `agentcontroll-v1.0.13-x86_64-apple-darwin.tar.gz` (macOS Intel)
-- `agentcontroll-v1.0.13-aarch64-apple-darwin.tar.gz` (macOS Apple Silicon)
+- `agentcontroll-v1.1.0-x86_64-unknown-linux-gnu.tar.gz` (Linux x86_64)
+- `agentcontroll-v1.1.0-x86_64-apple-darwin.tar.gz` (macOS Intel)
+- `agentcontroll-v1.1.0-aarch64-apple-darwin.tar.gz` (macOS Apple Silicon)
 
 ---
 
