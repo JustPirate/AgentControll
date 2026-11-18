@@ -213,17 +213,22 @@ files.
 
 **Controls:**
 
-- The adapter pre-validates that `SessionContext.workspace_path` exists on disk and is a valid directory prior to spawning the child process; missing or invalid paths cause immediate startup failure (`AdapterError::ConfigError`).
-- The adapter strictly pins child process `cwd` to `workspace.path` (via `Command::current_dir` or `portable_pty::CommandBuilder::cwd`).
-- Approval policies include `touched_paths` conditions; accesses to paths
-  outside the workspace prefix trigger policy evaluation and, by default,
-  `Escalate`.
-- The never-auto-approve list includes destructive operations outside the
-  workspace path.
+- **Kernel-Enforced Filesystem Sandboxing (Feature F4 / Linux Landlock):**
+  - Uses direct Linux Security Module (LSM) syscalls (`landlock_create_ruleset`, `landlock_add_rule`, `landlock_restrict_self`) and `prctl(PR_SET_NO_NEW_PRIVS)`.
+  - The parent compiles a ruleset allowlist with `O_PATH` file descriptors before fork. In `pre_exec` after fork, the child process enforces restrictions with zero memory allocations and zero locks (async-signal-safe).
+  - **Read-Write Access:** Granted exclusively to the session workspace directory (`workspace_path`), isolated account profile (`~/.config/agentcontrol/profiles/<account-id>/`), `/tmp`, `/dev` (so character devices like `/dev/null` remain writable for standard redirection), and configured `extra_write_paths`.
+  - **Read-Only Access:** Granted strictly to system essentials required for dynamic linking and standard runtime execution (`/usr`, `/lib`, `/lib64`, `/bin`, `/sbin`, `/opt`, `/etc`, `/proc`, `/sys`) and configured `extra_read_paths`.
+  - **Blocked (Default Deny):** All other directories—specifically user home files outside the profile (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.bashrc`), other developer repositories, and system administrative directories—return `EACCES` (Permission Denied) at the kernel level.
+  - Regular file rules enforce `FILE_MASK` filtering (`EXECUTE | WRITE_FILE | READ_FILE | TRUNCATE`) to prevent kernel `EINVAL`.
+- **Adapter Validation & PTY Integration:**
+  - The adapter pre-validates that `SessionContext.workspace_path` exists on disk and is a valid directory prior to spawning; missing or invalid paths cause immediate startup failure (`AdapterError::ConfigError`).
+  - Child process `cwd` is pinned to `workspace.path`.
+  - PTY master/slave device handles and Claude Code NDJSON pipes remain operational across the sandboxing boundary.
+- **Policy Engine Defense-in-Depth:**
+  - Approval policies evaluate `touched_paths` conditions; accesses to paths outside the workspace prefix trigger policy evaluation and, by default, `Escalate`.
+  - Destructive operations outside the workspace are on the permanent never-auto-approve list.
 
-**Residual risk:** Agent Control cannot enforce filesystem isolation without
-OS-level sandboxing (namespaces, seccomp). Filesystem-level isolation is a
-future extension (see [`FUTURE.md`](FUTURE.md)).
+**Residual risk:** On Linux systems with Landlock (kernel 5.13+, enabled by default in modern distributions), filesystem isolation is strictly enforced by the Linux kernel. On non-Linux platforms (macOS / Windows) or older Linux kernels lacking Landlock support, AgentControll degrades gracefully, relying on `cwd` pinning, environment isolation, and Policy Engine path evaluation.
 
 ---
 

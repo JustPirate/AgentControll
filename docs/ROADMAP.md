@@ -25,9 +25,10 @@ This roadmap documents future initiatives, planned enhancements, and architectur
 
 ## Medium-Term Roadmap (v1.2.0)
 
-### 4. Kernel-Enforced Filesystem Sandboxing (Linux Landlock / bubblewrap)
+### 4. Kernel-Enforced Filesystem Sandboxing (Linux Landlock / bubblewrap) [Completed]
 - Enforce strict filesystem boundaries ensuring agent child processes cannot access paths outside their designated working directories or account profiles.
 - Complement existing policy engine checks with kernel-level security isolation.
+- **Status**: Completed (v1.2.0) — Delivered native Linux Landlock filesystem sandboxing engine (`crates/ac-core/src/sandbox.rs`), ABI v1–v4 probing with graceful fallback on non-Linux, pre-fork ruleset compilation with async-signal-safe pre-exec child process restriction, regular file mask filtering, PTY and Claude Code child process integration, daemon `[sandbox]` configuration section, doctor diagnostic probe `system.landlock`, `--sandbox`/`--no-sandbox` CLI session flags, and comprehensive subprocess-isolated integration tests (`sandbox_tests.rs`).
 
 ### 5. Webhook & External Notification Triggers [Completed]
 - Configurable webhooks to push critical events (`SessionCrashed`, `HumanInterventionRequired`, `QuotaExhausted`, `SessionStopped`, `SessionFinished`) to Discord, Slack, generic HTTP webhooks, or desktop notifications.
@@ -56,7 +57,7 @@ This roadmap documents future initiatives, planned enhancements, and architectur
 | Reusable Session Presets | v1.1.0 (Completed) | Low | F10 |
 | Claude Multi-Account Sandbox | v1.1.0 (Completed) | Medium | ADR-014 |
 | OpenTelemetry Metrics Exporter | v1.1.0 (Completed) | Medium | F12 |
-| Linux Landlock Sandboxing | v1.2.0 | High | F4 |
+| Linux Landlock Sandboxing | v1.2.0 (Completed) | High | F4 |
 | Webhook Alert Dispatcher | v1.2.0 (Completed) | Low | F8 |
 | Subprocess Adapter Plugins | v1.2.0 | High | F5 / ADR-008 |
 | Remote Cluster Execution | v2.0.0 | High | F1 |

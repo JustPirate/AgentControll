@@ -219,6 +219,12 @@ enum SessionCmd {
         /// Optional conversation ID to resume.
         #[arg(short = 'c', long = "conversation")]
         conversation: Option<String>,
+        /// Force enable kernel filesystem sandbox (Landlock).
+        #[arg(long, conflicts_with = "no_sandbox")]
+        sandbox: bool,
+        /// Force disable kernel filesystem sandbox (Landlock).
+        #[arg(long, conflicts_with = "sandbox")]
+        no_sandbox: bool,
     },
     /// Start a session (transition Idle → Starting → Working).
     Start {
@@ -245,6 +251,12 @@ enum SessionCmd {
         /// Optional conversation ID to resume.
         #[arg(short = 'c', long = "conversation")]
         conversation: Option<String>,
+        /// Force enable kernel filesystem sandbox (Landlock).
+        #[arg(long, conflicts_with = "no_sandbox")]
+        sandbox: bool,
+        /// Force disable kernel filesystem sandbox (Landlock).
+        #[arg(long, conflicts_with = "sandbox")]
+        no_sandbox: bool,
     },
     /// Pause a running session.
     Pause {
@@ -811,15 +823,28 @@ fn build_request(commands: &Commands) -> Result<(String, serde_json::Value)> {
                 project_id,
                 account_id,
                 conversation,
+                sandbox,
+                no_sandbox,
             } => {
                 let mut map = serde_json::Map::new();
                 map.insert("task_description".into(), json!(task));
                 map.insert("agent_type".into(), json!(agent_type));
                 map.insert("project_id".into(), json!(project_id));
                 map.insert("account_id".into(), json!(account_id));
+                let mut launch_map = serde_json::Map::new();
                 if let Some(cid) = conversation {
                     map.insert("conversation_id".into(), json!(cid));
-                    map.insert("launch".into(), json!({ "conversation_id": cid }));
+                    launch_map.insert("conversation_id".into(), json!(cid));
+                }
+                if *sandbox {
+                    map.insert("sandbox".into(), json!(true));
+                    launch_map.insert("sandbox".into(), json!(true));
+                } else if *no_sandbox {
+                    map.insert("sandbox".into(), json!(false));
+                    launch_map.insert("sandbox".into(), json!(false));
+                }
+                if !launch_map.is_empty() {
+                    map.insert("launch".into(), serde_json::Value::Object(launch_map));
                 }
                 ("session.create".to_owned(), serde_json::Value::Object(map))
             }
@@ -834,6 +859,8 @@ fn build_request(commands: &Commands) -> Result<(String, serde_json::Value)> {
                 project_id,
                 account_id,
                 conversation,
+                sandbox,
+                no_sandbox,
             } => {
                 if let Some(tmpl) = template {
                     let mut map = serde_json::Map::new();
@@ -847,9 +874,20 @@ fn build_request(commands: &Commands) -> Result<(String, serde_json::Value)> {
                     if let Some(aid) = account_id {
                         map.insert("account_id".into(), json!(aid));
                     }
+                    let mut launch_map = serde_json::Map::new();
                     if let Some(cid) = conversation {
                         map.insert("conversation_id".into(), json!(cid));
-                        map.insert("launch".into(), json!({ "conversation_id": cid }));
+                        launch_map.insert("conversation_id".into(), json!(cid));
+                    }
+                    if *sandbox {
+                        map.insert("sandbox".into(), json!(true));
+                        launch_map.insert("sandbox".into(), json!(true));
+                    } else if *no_sandbox {
+                        map.insert("sandbox".into(), json!(false));
+                        launch_map.insert("sandbox".into(), json!(false));
+                    }
+                    if !launch_map.is_empty() {
+                        map.insert("launch".into(), serde_json::Value::Object(launch_map));
                     }
                     map.insert("start".into(), json!(true));
                     (
@@ -865,9 +903,20 @@ fn build_request(commands: &Commands) -> Result<(String, serde_json::Value)> {
                     map.insert("agent_type".into(), json!(agent_type));
                     map.insert("project_id".into(), json!(project_id));
                     map.insert("account_id".into(), json!(account_id));
+                    let mut launch_map = serde_json::Map::new();
                     if let Some(cid) = conversation {
                         map.insert("conversation_id".into(), json!(cid));
-                        map.insert("launch".into(), json!({ "conversation_id": cid }));
+                        launch_map.insert("conversation_id".into(), json!(cid));
+                    }
+                    if *sandbox {
+                        map.insert("sandbox".into(), json!(true));
+                        launch_map.insert("sandbox".into(), json!(true));
+                    } else if *no_sandbox {
+                        map.insert("sandbox".into(), json!(false));
+                        launch_map.insert("sandbox".into(), json!(false));
+                    }
+                    if !launch_map.is_empty() {
+                        map.insert("launch".into(), serde_json::Value::Object(launch_map));
                     }
                     (
                         "session.create_and_start".to_owned(),
@@ -1984,5 +2033,61 @@ mod tests {
         assert!(plain.contains("discord\tSUCCESS\tHTTP 204 No Content\n"));
         assert!(plain.contains("slack\tNOT_CONFIGURED\tSlack webhook URL not configured\n"));
         assert!(plain.contains("desktop\tFAILED\tnotify-send exited with code 1\n"));
+    }
+
+    #[test]
+    fn test_cli_parse_session_create_sandbox_flags() {
+        use clap::Parser;
+
+        // --sandbox
+        let cli = Cli::try_parse_from(["ac", "session", "create", "--task", "test", "--sandbox"])
+            .expect("parse --sandbox");
+        if let Commands::Session(SessionCmd::Create { sandbox, no_sandbox, .. }) = cli.command {
+            assert!(sandbox);
+            assert!(!no_sandbox);
+        } else {
+            panic!("expected SessionCmd::Create");
+        }
+
+        // --no-sandbox
+        let cli = Cli::try_parse_from(["ac", "session", "create", "--task", "test", "--no-sandbox"])
+            .expect("parse --no-sandbox");
+        if let Commands::Session(SessionCmd::Create { sandbox, no_sandbox, .. }) = cli.command {
+            assert!(!sandbox);
+            assert!(no_sandbox);
+        } else {
+            panic!("expected SessionCmd::Create");
+        }
+
+        // mutual exclusivity
+        assert!(Cli::try_parse_from(["ac", "session", "create", "--task", "test", "--sandbox", "--no-sandbox"]).is_err());
+    }
+
+    #[test]
+    fn test_cli_parse_session_run_sandbox_flags() {
+        use clap::Parser;
+
+        // --sandbox
+        let cli = Cli::try_parse_from(["ac", "session", "run", "--task", "run-task", "--sandbox"])
+            .expect("parse run --sandbox");
+        if let Commands::Session(SessionCmd::Run { sandbox, no_sandbox, .. }) = cli.command {
+            assert!(sandbox);
+            assert!(!no_sandbox);
+        } else {
+            panic!("expected SessionCmd::Run");
+        }
+
+        // --no-sandbox
+        let cli = Cli::try_parse_from(["ac", "session", "run", "--task", "run-task", "--no-sandbox"])
+            .expect("parse run --no-sandbox");
+        if let Commands::Session(SessionCmd::Run { sandbox, no_sandbox, .. }) = cli.command {
+            assert!(!sandbox);
+            assert!(no_sandbox);
+        } else {
+            panic!("expected SessionCmd::Run");
+        }
+
+        // mutual exclusivity
+        assert!(Cli::try_parse_from(["ac", "session", "run", "--task", "run-task", "--sandbox", "--no-sandbox"]).is_err());
     }
 }

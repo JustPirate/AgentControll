@@ -19,6 +19,7 @@ pub mod metrics;
 pub mod notifications;
 pub mod policy_engine;
 pub mod project_registry;
+pub mod sandbox;
 pub mod session;
 pub mod settings;
 pub mod template_manager;

@@ -98,4 +98,50 @@ pub fn check_system(_doctor: &Doctor, checks: &mut Vec<CheckResult>) {
         CheckResult::pass("system.xdg", "XDG environment", summary)
             .with_details(xdg_info.join(", ")),
     );
+
+    // Linux Landlock kernel filesystem sandboxing (Feature F4)
+    let landlock_status = crate::sandbox::LandlockStatus::probe();
+    match landlock_status {
+        crate::sandbox::LandlockStatus::Supported { abi } => {
+            checks.push(
+                CheckResult::pass(
+                    "system.landlock",
+                    "Kernel filesystem sandbox (Landlock)",
+                    format!("Supported (ABI v{abi})"),
+                )
+                .with_details(format!(
+                    "Linux Landlock ABI v{abi} supported (kernel sandboxing ready)"
+                )),
+            );
+        }
+        crate::sandbox::LandlockStatus::Disabled => {
+            checks.push(CheckResult::warn(
+                "system.landlock",
+                "Kernel filesystem sandbox (Landlock)",
+                "Landlock supported by kernel but disabled",
+                "Enable Landlock via kernel boot parameter (e.g. lsm=landlock,... in GRUB_CMDLINE_LINUX).",
+            ));
+        }
+        crate::sandbox::LandlockStatus::Unsupported { reason } => {
+            if os == "linux" {
+                checks.push(CheckResult::warn(
+                    "system.landlock",
+                    "Kernel filesystem sandbox (Landlock)",
+                    format!("Kernel does not support Landlock ({reason})"),
+                    "Upgrade to Linux kernel 5.13+ or compile kernel with CONFIG_SECURITY_LANDLOCK=y.",
+                ));
+            } else {
+                checks.push(
+                    CheckResult::info(
+                        "system.landlock",
+                        "Kernel filesystem sandbox (Landlock)",
+                        format!("Not available on {os}"),
+                    )
+                    .with_details(
+                        "Kernel filesystem sandboxing via Landlock requires Linux (kernel 5.13+).",
+                    ),
+                );
+            }
+        }
+    }
 }

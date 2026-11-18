@@ -573,6 +573,19 @@ impl ClaudeAdapter {
             cmd.env(k, v);
         }
 
+        // Filesystem sandboxing via Linux Landlock (Feature F4)
+        let policy = crate::sandbox::SandboxPolicy::from_session(ctx, None);
+        let ruleset = policy.prepare().context("preparing sandbox ruleset")?;
+        let ruleset_fd = ruleset.raw_fd();
+        if ruleset_fd >= 0 {
+            #[cfg(unix)]
+            unsafe {
+                cmd.pre_exec(move || {
+                    crate::sandbox::apply_raw_ruleset_fd(ruleset_fd)
+                });
+            }
+        }
+
         cmd.stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -580,6 +593,7 @@ impl ClaudeAdapter {
         let mut child = cmd.spawn().with_context(|| {
             format!("failed to spawn Claude executable '{}'", config.executable)
         })?;
+        drop(ruleset);
 
         let child_pid = child.id();
         let stdout = child

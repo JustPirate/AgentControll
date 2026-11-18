@@ -30,6 +30,9 @@ pub struct Config {
     /// Notification and webhook dispatch configuration (Feature F8).
     #[serde(default)]
     pub notifications: NotificationConfig,
+    /// Kernel-enforced filesystem sandboxing configuration (Feature F4).
+    #[serde(default)]
+    pub sandbox: SandboxConfig,
 }
 
 impl Default for Config {
@@ -47,6 +50,35 @@ impl Default for Config {
             metrics_enabled: true,
             metrics_bind_addr: "127.0.0.1:9100".to_owned(),
             notifications: NotificationConfig::default(),
+            sandbox: SandboxConfig::default(),
+        }
+    }
+}
+
+/// Configuration for kernel-enforced filesystem sandboxing (Feature F4).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SandboxConfig {
+    /// Whether sandboxing is enabled by default (default: true on Linux).
+    pub enabled: bool,
+    /// Sandboxing enforcement mode: "auto", "landlock", or "disabled".
+    pub mode: String,
+    /// Whether outbound network access is permitted (default: true).
+    pub allow_network: bool,
+    /// Extra paths granted Read-Only access.
+    pub extra_read_paths: Vec<PathBuf>,
+    /// Extra paths granted Read-Write access.
+    pub extra_write_paths: Vec<PathBuf>,
+}
+
+impl Default for SandboxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: cfg!(target_os = "linux"),
+            mode: "auto".to_string(),
+            allow_network: true,
+            extra_read_paths: Vec::new(),
+            extra_write_paths: Vec::new(),
         }
     }
 }
@@ -293,6 +325,43 @@ max_retries = 3
         // Clean up env vars
         std::env::remove_var("AC_DISCORD_WEBHOOK");
         std::env::remove_var("AC_SLACK_WEBHOOK");
+    }
+
+    #[test]
+    fn test_sandbox_config_defaults() {
+        let cfg = Config::default();
+        assert_eq!(cfg.sandbox.enabled, cfg!(target_os = "linux"));
+        assert_eq!(cfg.sandbox.mode, "auto");
+        assert!(cfg.sandbox.allow_network);
+        assert!(cfg.sandbox.extra_read_paths.is_empty());
+        assert!(cfg.sandbox.extra_write_paths.is_empty());
+    }
+
+    #[test]
+    fn test_sandbox_config_toml_parsing() {
+        let toml_str = r#"
+db_path = "/tmp/test.db"
+socket_path = "/tmp/test.sock"
+
+[sandbox]
+enabled = true
+mode = "landlock"
+allow_network = false
+extra_read_paths = ["/opt/models", "/srv/data"]
+extra_write_paths = ["/var/log/custom"]
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("parse toml");
+        assert!(cfg.sandbox.enabled);
+        assert_eq!(cfg.sandbox.mode, "landlock");
+        assert!(!cfg.sandbox.allow_network);
+        assert_eq!(
+            cfg.sandbox.extra_read_paths,
+            vec![PathBuf::from("/opt/models"), PathBuf::from("/srv/data")]
+        );
+        assert_eq!(
+            cfg.sandbox.extra_write_paths,
+            vec![PathBuf::from("/var/log/custom")]
+        );
     }
 }
 

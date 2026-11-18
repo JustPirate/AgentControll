@@ -267,11 +267,107 @@ impl GenericPtyAdapter {
             cmd.env(k, v);
         }
 
-        let mut child = pair
-            .slave
-            .spawn_command(cmd)
-            .context("spawning PTY child process")?;
-        drop(pair.slave); // Crucial: close slave in parent so master gets EOF on child exit
+        // Filesystem sandboxing via Linux Landlock (Feature F4)
+        let policy = crate::sandbox::SandboxPolicy::from_session(ctx, None);
+        let ruleset = policy.prepare().context("preparing sandbox ruleset")?;
+        let ruleset_fd = ruleset.raw_fd();
+
+        let mut child: Box<dyn portable_pty::Child + Send + Sync> = {
+            #[cfg(unix)]
+            {
+                let slave_path = pair.master.tty_name().or_else(|| {
+                    pair.master.as_raw_fd().and_then(|fd| {
+                        let ptr = unsafe { libc::ptsname(fd) };
+                        if !ptr.is_null() {
+                            let cstr = unsafe { std::ffi::CStr::from_ptr(ptr) };
+                            cstr.to_str().ok().map(PathBuf::from)
+                        } else {
+                            None
+                        }
+                    })
+                });
+
+                if ruleset_fd >= 0 && slave_path.is_some() {
+                    let slave_path = slave_path.unwrap();
+                    let slave_file = std::fs::OpenOptions::new()
+                        .read(true)
+                        .write(true)
+                        .open(&slave_path)
+                        .context("opening slave PTY device")?;
+
+                    drop(pair.slave); // Crucial: close original slave in parent
+
+                    use std::os::unix::process::CommandExt;
+                    let mut std_cmd = std::process::Command::new(&config.program);
+                    std_cmd.args(&config.args);
+                    if let Some(ref ws) = ctx.workspace_path {
+                        std_cmd.current_dir(ws);
+                    }
+                    for k in &config.env_remove {
+                        std_cmd.env_remove(k);
+                    }
+                    for (k, v) in &config.envs {
+                        std_cmd.env(k, v);
+                    }
+
+                    std_cmd.stdin(slave_file.try_clone().context("cloning slave PTY for stdin")?);
+                    std_cmd.stdout(slave_file.try_clone().context("cloning slave PTY for stdout")?);
+                    std_cmd.stderr(slave_file);
+
+                    unsafe {
+                        std_cmd.pre_exec(move || {
+                            for signo in &[
+                                libc::SIGCHLD,
+                                libc::SIGHUP,
+                                libc::SIGINT,
+                                libc::SIGQUIT,
+                                libc::SIGTERM,
+                                libc::SIGALRM,
+                            ] {
+                                libc::signal(*signo, libc::SIG_DFL);
+                            }
+
+                            let empty_set: libc::sigset_t = std::mem::zeroed();
+                            libc::sigprocmask(libc::SIG_SETMASK, &empty_set, std::ptr::null_mut());
+
+                            if libc::setsid() == -1 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+
+                            if libc::ioctl(0, libc::TIOCSCTTY as _, 0) == -1 {
+                                return Err(std::io::Error::last_os_error());
+                            }
+
+                            crate::sandbox::apply_raw_ruleset_fd(ruleset_fd)?;
+
+                            Ok(())
+                        });
+                    }
+
+                    let std_child = std_cmd
+                        .spawn()
+                        .context("spawning sandboxed PTY child process")?;
+                    Box::new(std_child)
+                } else {
+                    let c = pair
+                        .slave
+                        .spawn_command(cmd)
+                        .context("spawning PTY child process")?;
+                    drop(pair.slave);
+                    c
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let c = pair
+                    .slave
+                    .spawn_command(cmd)
+                    .context("spawning PTY child process")?;
+                drop(pair.slave);
+                c
+            }
+        };
+        drop(ruleset);
 
         let child_pid = child.process_id();
         debug!(
