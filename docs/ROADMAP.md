@@ -16,9 +16,10 @@ This roadmap documents future initiatives, planned enhancements, and architectur
 - Manage multiple Anthropic API keys and credential profiles concurrently without environment bleed.
 - **Status**: Completed (v1.1.0) — Delivered isolated profile directory management with strict 0700/0600 permissions, D-Bus session bus disabling (`DBUS_SESSION_BUS_ADDRESS="disabled:"`), ambient credential wiping (`AMBIENT_AUTH_ENV`), credential storage routing, and dedicated integration test suite (`claude_multi_account_tests.rs`).
 
-### 3. Native Metrics & OpenTelemetry Export
+### 3. Native Metrics & OpenTelemetry Export [Completed]
 - Expose Prometheus `/metrics` endpoint or OTLP stream over the local daemon.
 - Track session durations, crash frequencies, interaction approval rates, and account quota exhaustion.
+- **Status**: Completed (v1.1.0) — Delivered native Prometheus 0.0.4 text format exporter (`/metrics`), Kubernetes-standard liveness probes (`/health`, `/livez`), embedded lightweight HTTP server (`HttpServer`), IPC/WebSocket query endpoint (`metrics.get`), CLI command `ac metrics` (text & `--json`), and comprehensive integration test suite (`metrics_tests.rs`).
 
 ---
 
@@ -53,7 +54,7 @@ This roadmap documents future initiatives, planned enhancements, and architectur
 |:---|:---|:---|:---|
 | Reusable Session Presets | v1.1.0 (Completed) | Low | F10 |
 | Claude Multi-Account Sandbox | v1.1.0 (Completed) | Medium | ADR-014 |
-| OpenTelemetry Metrics Exporter | v1.1.0 | Medium | F12 |
+| OpenTelemetry Metrics Exporter | v1.1.0 (Completed) | Medium | F12 |
 | Linux Landlock Sandboxing | v1.2.0 | High | F4 |
 | Webhook Alert Dispatcher | v1.2.0 | Low | F8 |
 | Subprocess Adapter Plugins | v1.2.0 | High | F5 / ADR-008 |

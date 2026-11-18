@@ -381,6 +381,33 @@ pub async fn dispatch_request_ext(
                 ApiResponse::err(&req.id, "NotFound", format!("Unknown command: {}", req.cmd))
             }
         }
+        "metrics" => {
+            if req.cmd == "metrics.get" {
+                let collector = crate::metrics::MetricsCollector::new(
+                    session_mgr.clone(),
+                    account_mgr.clone(),
+                    interaction_hub.clone(),
+                );
+                match collector.gather().await {
+                    Ok(snapshot) => {
+                        let prometheus =
+                            crate::metrics::MetricsCollector::format_prometheus(&snapshot);
+                        let metrics =
+                            crate::metrics::MetricsCollector::format_json(&snapshot);
+                        ApiResponse::ok(
+                            &req.id,
+                            json!({
+                                "prometheus": prometheus,
+                                "metrics": metrics,
+                            }),
+                        )
+                    }
+                    Err(e) => ApiResponse::err(&req.id, "InternalError", e.to_string()),
+                }
+            } else {
+                ApiResponse::err(&req.id, "NotFound", format!("Unknown command: {}", req.cmd))
+            }
+        }
         "daemon" => ApiResponse::ok(
             &req.id,
             json!({ "version": env!("CARGO_PKG_VERSION"), "status": "running" }),

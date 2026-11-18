@@ -168,17 +168,17 @@ async fn main() -> Result<()> {
 
         let ws_server = ac_core::ws::WsServer::bind(
             &cfg.ws_bind_addr,
-            mgr_handle,
+            mgr_handle.clone(),
             event_tx.clone(),
             token_registry,
         )
         .await
         .map(|server| {
             server
-                .with_account_manager(acct_handle)
-                .with_project_registry(proj_handle)
-                .with_interaction_hub(hub_handle)
-                .with_template_manager(template_handle)
+                .with_account_manager(acct_handle.clone())
+                .with_project_registry(proj_handle.clone())
+                .with_interaction_hub(hub_handle.clone())
+                .with_template_manager(template_handle.clone())
         });
 
         match ws_server {
@@ -202,6 +202,36 @@ async fn main() -> Result<()> {
         None
     };
 
+    // ── 8.5. HTTP metrics & health server (Feature F12) ───────────────────
+    let metrics_collector = ac_core::metrics::MetricsCollector::new(
+        mgr_handle.clone(),
+        Some(acct_handle.clone()),
+        Some(hub_handle.clone()),
+    )
+    .with_event_channel(&event_tx);
+
+    let metrics_handle = if cfg.metrics_enabled {
+        match ac_core::metrics::HttpServer::bind(&cfg.metrics_bind_addr, metrics_collector).await {
+            Ok(http_server) => {
+                let handle = tokio::spawn(async move { http_server.run().await });
+                info!(
+                    "Metrics & health HTTP server listening on http://{}",
+                    cfg.metrics_bind_addr
+                );
+                Some(handle)
+            }
+            Err(e) => {
+                warn!(
+                    "Metrics HTTP server failed to bind on {}: {e}; continuing",
+                    cfg.metrics_bind_addr
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     info!("Daemon ready. Listening on {}", cfg.socket_path.display());
 
     // ── 9. Shutdown signal ────────────────────────────────────────────────
@@ -212,6 +242,11 @@ async fn main() -> Result<()> {
     let _ = ipc_handle.await;
 
     if let Some(handle) = ws_handle {
+        handle.abort();
+        let _ = handle.await;
+    }
+
+    if let Some(handle) = metrics_handle {
         handle.abort();
         let _ = handle.await;
     }

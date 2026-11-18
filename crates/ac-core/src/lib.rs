@@ -15,6 +15,7 @@ pub mod doctor;
 pub mod event_store;
 pub mod interaction_hub;
 pub mod ipc;
+pub mod metrics;
 pub mod policy_engine;
 pub mod project_registry;
 pub mod session;

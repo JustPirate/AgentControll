@@ -657,4 +657,17 @@ impl DaemonClient {
             .context("Missing session_id in create_session_from_template response")?;
         Ok(sid)
     }
+
+    /// Retrieve metrics from the daemon (Feature F12).
+    pub async fn get_metrics(&self) -> Result<serde_json::Value> {
+        let resp = self.send_command("metrics.get", json!({})).await?;
+        if !resp.ok {
+            let msg = resp
+                .error
+                .map(|e| e.message)
+                .unwrap_or_else(|| "Unknown error".into());
+            anyhow::bail!("Failed to get metrics: {msg}");
+        }
+        resp.result.context("Missing result in metrics.get response")
+    }
 }

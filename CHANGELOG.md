@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Native Metrics & OpenTelemetry Export (F12)**: Embedded Prometheus 0.0.4 exporter, HTTP health endpoints, IPC metrics API, and CLI telemetry commands for monitoring agent sessions and daemon health.
+  - **Metrics Engine & Collector**: Implemented `MetricsCollector` in `crates/ac-core/src/metrics.rs` collecting telemetry from `SessionManager`, `InteractionHub`, `AccountManager`, and SQLite `EventStore`. Tracks sessions total, active states breakdown, crash and restart counts, session duration histogram, interaction outcomes by decision, pending interaction count, approval latency histogram, account provider counts, and concurrency caps.
+  - **Prometheus 0.0.4 & JSON Exporter**: Output formatted in standard Prometheus 0.0.4 text format with `# HELP` and `# TYPE` headers, strict label escaping (`"`, `\`, `\n`), and structured JSON representation.
+  - **Lightweight HTTP Server**: Embedded asynchronous Tokio TCP server serving `GET /metrics` (`200 OK text/plain; version=0.0.4`) and Kubernetes liveness probes `GET /health` and `GET /livez` (`200 OK application/json`).
+  - **Daemon Lifecycle & Config**: Added `metrics_enabled` (default: `true`) and `metrics_bind_addr` (default: `"127.0.0.1:9100"`) to `Config`. Integrated server lifecycle into `agentcontrold` with clean shutdown on SIGINT/SIGTERM.
+  - **IPC & WebSocket Dispatch**: Handled `metrics.get` in `dispatch_request_ext` returning Prometheus text format and structured JSON metrics.
+  - **CLI Telemetry Subcommand**: Added `ac metrics` command outputting standard Prometheus text format by default, or pretty-printed JSON with `--json`. Added `DaemonClient::get_metrics` in `client.rs`.
+  - **Integration Test Suite**: Added comprehensive tests in `crates/ac-core/tests/metrics_tests.rs` covering HTTP scraping, health endpoints, IPC dispatch, Prometheus syntax compliance, and dynamic counter increments.
 - **Claude Code Multi-Account Isolation (ADR-014)**: Full per-account profile and credential isolation for Claude Code sessions.
   - **Isolated Profile Environments**: Created isolated profile directories under `~/.config/agentcontrol/profiles/<account-id>/` with restricted filesystem permissions (`0700` directories, `0600` config files), private `.claude` directories, and symlinked developer tooling excluding configuration targets (`crates/ac-core/src/adapter/claude.rs`).
   - **Keyring & D-Bus Disconnection**: Enforced `DBUS_SESSION_BUS_ADDRESS="disabled:"` across child processes to isolate Claude CLI / keytar from host desktop keyrings (GNOME Keyring / KWallet).

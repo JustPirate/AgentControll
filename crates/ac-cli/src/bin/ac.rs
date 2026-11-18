@@ -74,6 +74,12 @@ enum Commands {
     /// Event log commands.
     #[command(subcommand)]
     Events(EventsCmd),
+    /// View native metrics and OpenTelemetry data from the daemon.
+    Metrics {
+        /// Output metrics in structured JSON format instead of Prometheus text format.
+        #[arg(long)]
+        json: bool,
+    },
     /// Daemon status.
     Status,
     /// Log in to an account (e.g. Antigravity / Google).
@@ -729,8 +735,16 @@ async fn main() -> Result<()> {
 
     let plain = cli.plain || !std::io::stdout().is_terminal();
 
-    if cli.json {
-        if cmd == "session.get" && resp.ok {
+    let is_json = cli.json || matches!(&cli.command, Commands::Metrics { json: true, .. });
+
+    if is_json {
+        if cmd == "metrics.get" && resp.ok {
+            if let Some(metrics) = resp.result.as_ref().and_then(|r| r.get("metrics")) {
+                println!("{}", serde_json::to_string_pretty(metrics)?);
+            } else {
+                println!("{}", serde_json::to_string_pretty(&resp)?);
+            }
+        } else if cmd == "session.get" && resp.ok {
             if let Some(serde_json::Value::Object(mut map)) = resp.result.clone() {
                 map.insert("ok".into(), json!(true));
                 map.insert("v".into(), json!(resp.v));
@@ -756,6 +770,7 @@ async fn main() -> Result<()> {
 fn build_request(commands: &Commands) -> Result<(String, serde_json::Value)> {
     let (cmd, params) = match commands {
         Commands::Status => ("daemon.status".to_owned(), json!({})),
+        Commands::Metrics { .. } => ("metrics.get".to_owned(), json!({})),
         Commands::Tui | Commands::Dashboard | Commands::Login { .. } | Commands::Doctor { .. } => {
             unreachable!()
         }
@@ -1283,6 +1298,12 @@ async fn subscribe_events(socket_path: &PathBuf) -> Result<()> {
 fn print_response(resp: &ApiResponse, plain: bool) {
     if resp.ok {
         if let Some(result) = &resp.result {
+            // Metrics
+            if let Some(prom) = result.get("prometheus").and_then(|p| p.as_str()) {
+                print!("{}", prom);
+                return;
+            }
+
             // Sessions list
             if let Some(sessions) = result.get("sessions").and_then(|s| s.as_array()) {
                 if sessions.is_empty() {

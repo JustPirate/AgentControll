@@ -23,6 +23,10 @@ pub struct Config {
     pub ws_bind_addr: String,
     /// Optional path to a file containing authentication tokens (one per line: `<token>:<scope>`).
     pub ws_auth_token_path: Option<PathBuf>,
+    /// Whether the native Prometheus /metrics HTTP exporter is enabled (Feature F12).
+    pub metrics_enabled: bool,
+    /// Loopback bind address for the metrics HTTP exporter (e.g. "127.0.0.1:9100").
+    pub metrics_bind_addr: String,
 }
 
 impl Default for Config {
@@ -37,6 +41,8 @@ impl Default for Config {
             ws_enabled: true,
             ws_bind_addr: "127.0.0.1:4242".to_owned(),
             ws_auth_token_path: None,
+            metrics_enabled: true,
+            metrics_bind_addr: "127.0.0.1:9100".to_owned(),
         }
     }
 }
