@@ -5,7 +5,10 @@
 
 pub mod claude;
 pub mod mock;
+pub mod plugin;
 pub mod pty;
+
+pub use plugin::SubprocessAdapter;
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -92,6 +95,7 @@ pub struct CompositeAdapterFactory {
     pub claude_config: claude::ClaudeConfig,
     pub pty_config: pty::PtyConfig,
     pub mock_factory: Option<mock::MockAdapterFactory>,
+    pub plugins: Vec<crate::config::PluginConfig>,
 }
 
 impl CompositeAdapterFactory {
@@ -100,7 +104,12 @@ impl CompositeAdapterFactory {
             claude_config: claude::ClaudeConfig::default(),
             pty_config: pty::PtyConfig::default(),
             mock_factory: None,
+            plugins: Vec::new(),
         }
+    }
+
+    pub fn from_config(cfg: &crate::config::Config) -> Self {
+        Self::new().with_plugins(cfg.plugins.clone())
     }
 
     pub fn with_claude_config(mut self, cfg: claude::ClaudeConfig) -> Self {
@@ -117,6 +126,21 @@ impl CompositeAdapterFactory {
         self.mock_factory = Some(factory);
         self
     }
+
+    pub fn with_plugins(mut self, plugins: Vec<crate::config::PluginConfig>) -> Self {
+        self.plugins = plugins;
+        self
+    }
+
+    pub fn register_plugin(&mut self, plugin: crate::config::PluginConfig) {
+        self.plugins.push(plugin);
+    }
+
+    pub fn find_plugin(&self, agent_type: &str) -> Option<&crate::config::PluginConfig> {
+        self.plugins
+            .iter()
+            .find(|p| p.agent_types.iter().any(|t| t == agent_type))
+    }
 }
 
 impl Default for CompositeAdapterFactory {
@@ -127,6 +151,10 @@ impl Default for CompositeAdapterFactory {
 
 impl AdapterFactory for CompositeAdapterFactory {
     fn preflight(&self, ctx: &SessionContext) -> Result<()> {
+        if let Some(plugin) = self.find_plugin(&ctx.agent_type) {
+            return plugin::SubprocessAdapter::preflight(ctx, plugin);
+        }
+
         match ctx.agent_type.as_str() {
             "agy" | "antigravity" => Self::preflight_agy(ctx),
             "claude-code" | "claude" => Self::preflight_claude(ctx),
@@ -135,6 +163,10 @@ impl AdapterFactory for CompositeAdapterFactory {
     }
 
     fn capabilities(&self, agent_type: &str) -> ProviderCapabilities {
+        if let Some(plugin) = self.find_plugin(agent_type) {
+            return plugin::SubprocessAdapter::capabilities(plugin);
+        }
+
         match agent_type {
             "claude-code" | "claude" => claude::ClaudeAdapter::capabilities(),
             "generic-pty" | "pty" | "shell" | "bash" | "zsh" | "agy" | "antigravity" => {
@@ -160,6 +192,10 @@ impl AdapterFactory for CompositeAdapterFactory {
         ctx: SessionContext,
         event_tx: mpsc::Sender<AdapterEvent>,
     ) -> Result<AdapterHandle> {
+        if let Some(plugin) = self.find_plugin(&ctx.agent_type).cloned() {
+            return plugin::SubprocessAdapter::spawn(&ctx, &plugin, event_tx);
+        }
+
         match ctx.agent_type.as_str() {
             "claude-code" | "claude" => {
                 claude::ClaudeAdapter::spawn(&ctx, self.claude_config.clone(), event_tx)
@@ -317,4 +353,65 @@ pub fn resolve_real_antigravity_bin() -> String {
     }
 
     "agy".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{PluginCapabilitiesConfig, PluginConfig};
+    use crate::types::AccountSwitchMode;
+
+    #[test]
+    fn test_composite_factory_plugin_routing() {
+        let plugin = PluginConfig::new("devin-adapter", "sh", vec!["devin".into(), "cognition".into()])
+            .with_capabilities(PluginCapabilitiesConfig {
+                switch_mode: AccountSwitchMode::Dynamic,
+                supports_session_resume: true,
+                supports_snapshot_restore: true,
+                requires_process_restart: false,
+                ..Default::default()
+            });
+
+        let mut factory = CompositeAdapterFactory::new().with_plugins(vec![plugin]);
+        assert_eq!(factory.plugins.len(), 1);
+
+        // Capabilities routing
+        let caps = factory.capabilities("devin");
+        assert_eq!(caps.switch_mode, AccountSwitchMode::Dynamic);
+        assert!(caps.supports_session_resume);
+        assert!(caps.supports_snapshot_restore);
+        assert!(!caps.requires_process_restart);
+
+        let caps_cognition = factory.capabilities("cognition");
+        assert_eq!(caps_cognition.switch_mode, AccountSwitchMode::Dynamic);
+
+        // Fallback for built-ins
+        let caps_claude = factory.capabilities("claude");
+        assert_eq!(caps_claude.switch_mode, AccountSwitchMode::RequiresRestart);
+
+        // Register additional plugin dynamically
+        let custom_plugin = PluginConfig::new("custom", "sh", vec!["custom-agent".into()]);
+        factory.register_plugin(custom_plugin);
+        assert_eq!(factory.plugins.len(), 2);
+        assert!(factory.find_plugin("custom-agent").is_some());
+    }
+
+    #[test]
+    fn test_composite_factory_plugin_preflight() {
+        let plugin = PluginConfig::new(
+            "nonexistent-plugin",
+            "/nonexistent/executable/binary",
+            vec!["nonexistent".into()],
+        );
+        let factory = CompositeAdapterFactory::new().with_plugins(vec![plugin]);
+        let ctx = SessionContext::new(
+            Id::new(),
+            "test task".into(),
+            "nonexistent".into(),
+        );
+
+        let res = factory.preflight(&ctx);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().to_string().contains("not exist"));
+    }
 }

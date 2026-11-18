@@ -111,7 +111,7 @@ async fn main() -> Result<()> {
     let (event_tx, _) = broadcast::channel::<AgentEvent>(1024);
     let (cmd_tx, cmd_rx) = mpsc::channel(256);
 
-    let adapter_factory = Box::new(CompositeAdapterFactory::new());
+    let adapter_factory = Box::new(CompositeAdapterFactory::from_config(&cfg));
 
     let mut manager = SessionManager::new(
         store,

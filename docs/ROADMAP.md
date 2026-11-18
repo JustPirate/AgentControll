@@ -34,8 +34,9 @@ This roadmap documents future initiatives, planned enhancements, and architectur
 - Configurable webhooks to push critical events (`SessionCrashed`, `HumanInterventionRequired`, `QuotaExhausted`, `SessionStopped`, `SessionFinished`) to Discord, Slack, generic HTTP webhooks, or desktop notifications.
 - **Status**: Completed (v1.2.0) — Delivered asynchronous notification dispatcher engine (`crates/ac-core/src/notifications.rs`) with rich Discord embeds, Slack attachments, generic HTTP JSON webhooks with exponential backoff retries, local desktop notifications (`notify-send` / `osascript`), IPC & WebSocket APIs (`notification.test`, `notification.status`), CLI subcommands (`ac notify test`, `ac notify status`), and client RPC methods in `DaemonClient`.
 
-### 6. Dynamic Adapter Plugins
+### 6. Dynamic Adapter Plugins [Completed]
 - Allow third-party agent adapters to be registered as external executables communicating over stdin/stdout JSON-RPC, without requiring recompilation of `agentcontrold`.
+- **Status**: Completed (v1.2.0) — Delivered dynamic subprocess adapter plugin engine (`crates/ac-core/src/adapter/plugin.rs`), TOML configuration schema (`[[plugins]]`, `[plugins.capabilities]`) in `config.rs`, comprehensive NDJSON/JSON-RPC bidirectional streaming protocol supporting all `AgentCommand` instructions and `AdapterEvent` payloads with plaintext fallback, Linux Landlock filesystem sandboxing integration with pre-exec ruleset enforcement, RAII `SubprocessDropGuard` process lifecycle supervision with SIGKILL escalation, 20-line stderr diagnostic ring buffer, composite routing in `CompositeAdapterFactory`, and full end-to-end integration test suite (`plugin_adapter_tests.rs`).
 
 ---
 
@@ -59,6 +60,6 @@ This roadmap documents future initiatives, planned enhancements, and architectur
 | OpenTelemetry Metrics Exporter | v1.1.0 (Completed) | Medium | F12 |
 | Linux Landlock Sandboxing | v1.2.0 (Completed) | High | F4 |
 | Webhook Alert Dispatcher | v1.2.0 (Completed) | Low | F8 |
-| Subprocess Adapter Plugins | v1.2.0 | High | F5 / ADR-008 |
+| Subprocess Adapter Plugins | v1.2.0 (Completed) | High | F5 / ADR-008 |
 | Remote Cluster Execution | v2.0.0 | High | F1 |
 | Web Companion Dashboard | v2.0.0 | Medium | F3 |
