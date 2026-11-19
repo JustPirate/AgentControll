@@ -217,13 +217,35 @@ impl AdapterFactory for CompositeAdapterFactory {
                     && ctx.task_description != "shell"
                     && ctx.task_description != "Interactive Shell"
                 {
-                    shell_cfg.args = vec!["-c".to_string(), ctx.task_description.clone()];
+                    let effective_task = match &ctx.context_snapshot {
+                        Some(snap) if !snap.trim().is_empty() => {
+                            format!("{}\n\nActive task prompt: {}", snap, ctx.task_description)
+                        }
+                        _ => ctx.task_description.clone(),
+                    };
+                    shell_cfg.args = vec!["-c".to_string(), effective_task];
                 }
                 pty::GenericPtyAdapter::spawn(&ctx, shell_cfg, event_tx)
             }
             "agy" | "antigravity" => {
                 let mut agy_cfg = self.pty_config.clone();
                 agy_cfg.program = resolve_real_antigravity_bin();
+
+                // Register default rate-limit / quota regex pattern rules for agy
+                let quota_pattern = r"(?i)(rate limit|429|quota exhausted|resource has been exhausted|rate_limit_exceeded|quota exceeded)";
+                if !agy_cfg.patterns.iter().any(|r| {
+                    r.pattern.as_str().contains("quota") || r.pattern.as_str().contains("429")
+                }) {
+                    if let Ok(rule) = pty::PtyPatternRule::new(
+                        quota_pattern,
+                        pty::PtyPatternKind::RateLimitSignal {
+                            back_off_secs: Some(60),
+                        },
+                    ) {
+                        agy_cfg.patterns.push(rule);
+                    }
+                }
+
                 tracing::info!(
                     "Launching agy for session {} with account_id={:?}, credential_ref={:?}",
                     ctx.session_id,
@@ -250,7 +272,14 @@ impl AdapterFactory for CompositeAdapterFactory {
                 }
                 agy_cfg.args.extend(launch_opts.args());
                 if launch_opts.conversation_id.is_none() {
-                    agy_cfg.args.extend(agy_task_args(&ctx.task_description));
+                    let is_interactive = ctx.task_description.trim().starts_with("[interactive]");
+                    let effective_task = match &ctx.context_snapshot {
+                        Some(snap) if !snap.trim().is_empty() && !is_interactive => {
+                            format!("{}\n\nActive task prompt: {}", snap, ctx.task_description)
+                        }
+                        _ => ctx.task_description.clone(),
+                    };
+                    agy_cfg.args.extend(agy_task_args(&effective_task));
                 }
                 pty::GenericPtyAdapter::spawn(&ctx, agy_cfg, event_tx).map_err(|e| {
                     crate::agy_auth::AgyAuthError::LaunchFailure {

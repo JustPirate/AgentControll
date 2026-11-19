@@ -39,6 +39,9 @@ pub struct Config {
     /// Dynamic subprocess adapter plugins (Feature F5 / ADR-008).
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
+    /// Account pool and auto-failover configuration.
+    #[serde(default)]
+    pub accounts: AccountsConfig,
 }
 
 impl Default for Config {
@@ -58,6 +61,41 @@ impl Default for Config {
             notifications: NotificationConfig::default(),
             sandbox: SandboxConfig::default(),
             plugins: Vec::new(),
+            accounts: AccountsConfig::default(),
+        }
+    }
+}
+
+/// Configuration for account management and failover behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AccountsConfig {
+    pub auto_failover: AutoFailoverConfig,
+}
+
+impl Default for AccountsConfig {
+    fn default() -> Self {
+        Self {
+            auto_failover: AutoFailoverConfig::default(),
+        }
+    }
+}
+
+/// Configuration for autonomous quota failover and 429 auto-handoff.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AutoFailoverConfig {
+    /// Whether autonomous quota failover is enabled (default: true).
+    pub enabled: bool,
+    /// Default cooldown period in seconds for rate-limited accounts (default: 60).
+    pub default_cooldown_secs: u64,
+}
+
+impl Default for AutoFailoverConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            default_cooldown_secs: 60,
         }
     }
 }
@@ -405,6 +443,28 @@ fn dirs_home() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_default_accounts_and_auto_failover_config() {
+        let cfg = Config::default();
+        assert!(cfg.accounts.auto_failover.enabled);
+        assert_eq!(cfg.accounts.auto_failover.default_cooldown_secs, 60);
+    }
+
+    #[test]
+    fn test_accounts_config_toml_parsing() {
+        let toml_str = r#"
+db_path = "/tmp/test.db"
+socket_path = "/tmp/test.sock"
+
+[accounts.auto_failover]
+enabled = false
+default_cooldown_secs = 120
+"#;
+        let cfg: Config = toml::from_str(toml_str).expect("parse accounts toml");
+        assert!(!cfg.accounts.auto_failover.enabled);
+        assert_eq!(cfg.accounts.auto_failover.default_cooldown_secs, 120);
+    }
 
     #[test]
     fn test_default_notification_config() {

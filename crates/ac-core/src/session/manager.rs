@@ -166,6 +166,10 @@ pub struct SessionManager {
     project_registry: Option<ProjectRegistryHandle>,
     /// Phase 3: optional interaction hub.
     interaction_hub: Option<InteractionHubHandle>,
+    /// Whether autonomous failover on rate limit / quota exhaustion is enabled.
+    pub auto_failover_enabled: bool,
+    /// Default cooldown period in seconds for rate-limited accounts.
+    pub default_cooldown_secs: u64,
 }
 
 impl SessionManager {
@@ -190,7 +194,22 @@ impl SessionManager {
             account_mgr: None,
             project_registry: None,
             interaction_hub: None,
+            auto_failover_enabled: true,
+            default_cooldown_secs: 60,
         }
+    }
+
+    /// Configure whether autonomous failover on rate limit / quota exhaustion is enabled.
+    pub fn with_auto_failover(mut self, enabled: bool) -> Self {
+        self.auto_failover_enabled = enabled;
+        self
+    }
+
+    /// Configure auto-failover from an `AutoFailoverConfig`.
+    pub fn with_auto_failover_config(mut self, cfg: &crate::config::AutoFailoverConfig) -> Self {
+        self.auto_failover_enabled = cfg.enabled;
+        self.default_cooldown_secs = cfg.default_cooldown_secs;
+        self
     }
 
     /// Attach a Phase 2 Account Manager.
@@ -1441,6 +1460,20 @@ impl SessionManager {
         };
 
         let resolved_target_id = if let Some(tid) = target_account_id {
+            if let Some(mgr_handle) = self.account_mgr.clone() {
+                let mgr = mgr_handle.0.lock().unwrap();
+                if let Some(ref cur_aid) = current_account_id {
+                    if let (Some(cur_acc), Some(target_acc)) = (mgr.get(cur_aid), mgr.get(&tid)) {
+                        if !providers_match(&cur_acc.provider, &target_acc.provider) {
+                            bail!(
+                                "ProviderMismatch: Target account provider '{}' does not match current account provider '{}'",
+                                target_acc.provider,
+                                cur_acc.provider
+                            );
+                        }
+                    }
+                }
+            }
             tid
         } else if let Some(mgr_handle) = self.account_mgr.clone() {
             // Auto-select an account compatible with agent_type excluding current_account_id
@@ -1459,13 +1492,26 @@ impl SessionManager {
                 vec![]
             };
 
-            let mgr = mgr_handle.0.lock().unwrap();
+            let mut mgr = mgr_handle.0.lock().unwrap();
+            let _ = mgr.maybe_expire_all_cooldowns();
+
+            let current_provider = current_account_id
+                .as_ref()
+                .and_then(|aid| mgr.get(aid).map(|a| a.provider.clone()));
+
             let candidate = mgr
                 .list(None, &tags)
                 .into_iter()
                 .filter(|a| a.can_accept_session())
                 .filter(|a| a.supports_agent_type(&agent_type))
                 .filter(|a| Some(&a.id) != current_account_id.as_ref())
+                .filter(|a| {
+                    if let Some(ref cur_prov) = current_provider {
+                        providers_match(&a.provider, cur_prov)
+                    } else {
+                        true
+                    }
+                })
                 .min_by(|a, b| {
                     a.active_session_count
                         .cmp(&b.active_session_count)
@@ -1863,6 +1909,21 @@ impl SessionManager {
     // ── Phase 3: Interaction & Adapter event handlers ────────────────────────
 
     async fn handle_adapter_event(&mut self, session_id: Id, event: AdapterEvent) {
+        if let Some(session) = self.sessions.get(&session_id.0) {
+            if session.state == SessionState::HandedOff || session.state == SessionState::Stopping {
+                if matches!(
+                    event,
+                    AdapterEvent::Crashed { .. } | AdapterEvent::Completed { .. }
+                ) {
+                    debug!(
+                        "SessionManager: ignoring exit/crash event for session {} already in {:?}",
+                        session_id, session.state
+                    );
+                    return;
+                }
+            }
+        }
+
         match &event {
             AdapterEvent::OutputChunk { text, .. } => {
                 trace!(
@@ -1901,10 +1962,11 @@ impl SessionManager {
             AdapterEvent::RateLimitSignal { back_off_secs } => {
                 let _ = self.emit(AgentEvent::new(
                     EventKind::AccountRateLimited,
-                    Some(session_id),
+                    Some(session_id.clone()),
                     json!({ "back_off_secs": back_off_secs }),
                     "adapter",
                 ));
+                self.handle_auto_failover(session_id, back_off_secs).await;
             }
             AdapterEvent::Paused => {}
             AdapterEvent::Resumed => {}
@@ -1912,14 +1974,54 @@ impl SessionManager {
                 let _ = self.cmd_stop(session_id, summary).await;
             }
             AdapterEvent::Crashed { exit_code, reason } => {
-                let _ = self.emit(AgentEvent::new(
-                    EventKind::SessionCrashed,
-                    Some(session_id.clone()),
-                    json!({ "exit_code": exit_code, "reason": reason }),
-                    "adapter",
-                ));
-                let _ = self.do_transition(&session_id, SessionState::Crashed, "adapter");
-                self.reconcile_account_loads();
+                let is_quota_or_rate_limit = if let Some(ref r) = reason {
+                    let r_lower = r.to_lowercase();
+                    r_lower.contains("429")
+                        || r_lower.contains("rate limit")
+                        || r_lower.contains("quota")
+                        || r_lower.contains("resource has been exhausted")
+                        || r_lower.contains("rate_limit_exceeded")
+                } else {
+                    false
+                };
+
+                if is_quota_or_rate_limit {
+                    let is_exhausted = reason
+                        .as_ref()
+                        .map(|r| {
+                            let rl = r.to_lowercase();
+                            rl.contains("quota exhausted")
+                                || rl.contains("resource has been exhausted")
+                        })
+                        .unwrap_or(false);
+
+                    let back_off_secs = if is_exhausted {
+                        None
+                    } else {
+                        Some(self.default_cooldown_secs)
+                    };
+
+                    let _ = self.emit(AgentEvent::new(
+                        EventKind::AccountRateLimited,
+                        Some(session_id.clone()),
+                        json!({
+                            "reason": reason,
+                            "exit_code": exit_code,
+                            "back_off_secs": back_off_secs
+                        }),
+                        "adapter",
+                    ));
+                    self.handle_auto_failover(session_id, back_off_secs).await;
+                } else {
+                    let _ = self.emit(AgentEvent::new(
+                        EventKind::SessionCrashed,
+                        Some(session_id.clone()),
+                        json!({ "exit_code": exit_code, "reason": reason }),
+                        "adapter",
+                    ));
+                    let _ = self.do_transition(&session_id, SessionState::Crashed, "adapter");
+                    self.reconcile_account_loads();
+                }
             }
             AdapterEvent::SnapshotProduced { summary } => {
                 let _ = self.emit(AgentEvent::new(
@@ -1935,6 +2037,115 @@ impl SessionManager {
                     session_id, reason
                 );
             }
+        }
+    }
+
+    async fn handle_auto_failover(&mut self, session_id: Id, back_off_secs: Option<u64>) {
+        let (current_account_id, is_active) = match self.sessions.get(&session_id.0) {
+            Some(s) => (s.account_id.clone(), !s.state.is_terminal()),
+            None => return,
+        };
+
+        if !is_active {
+            return;
+        }
+
+        // 1. Expire past cooldowns and update current account state
+        if let Some(mgr_handle) = self.account_mgr.clone() {
+            let mut mgr = mgr_handle.0.lock().unwrap();
+            if let Ok(expired_ids) = mgr.maybe_expire_all_cooldowns() {
+                for eid in expired_ids {
+                    let _ = self.emit(AgentEvent::new(
+                        EventKind::AccountCooldownExpired,
+                        None,
+                        json!({ "account_id": eid }),
+                        "account_manager",
+                    ));
+                }
+            }
+
+            if let Some(aid) = &current_account_id {
+                match back_off_secs {
+                    Some(secs) if secs > 0 => {
+                        let until = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+                        if let Err(e) = mgr.start_cooldown(aid, until) {
+                            warn!("Failed to start cooldown for account {}: {}", aid, e);
+                        } else {
+                            let _ = self.emit(AgentEvent::new(
+                                EventKind::AccountCooldownStarted,
+                                Some(session_id.clone()),
+                                json!({
+                                    "account_id": aid,
+                                    "cooldown_until": until.to_rfc3339(),
+                                    "back_off_secs": secs,
+                                }),
+                                "auto_failover",
+                            ));
+                        }
+                    }
+                    _ => {
+                        if let Err(e) = mgr.mark_exhausted(aid) {
+                            warn!("Failed to mark account {} exhausted: {}", aid, e);
+                        } else {
+                            let _ = self.emit(AgentEvent::new(
+                                EventKind::AccountExhausted,
+                                Some(session_id.clone()),
+                                json!({
+                                    "account_id": aid,
+                                    "reason": "quota_exhausted",
+                                }),
+                                "auto_failover",
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Autonomous failover or transition to RateLimited
+        if self.auto_failover_enabled {
+            info!(
+                "Auto-failover enabled: initiating autonomous hand-off for session {}",
+                session_id
+            );
+            match self.cmd_handoff(session_id.clone(), None).await {
+                Ok(successor_id) => {
+                    tracing::info!(
+                        target: "telemetry",
+                        "Autonomous failover succeeded: predecessor_session={}, successor_session={}, old_account={:?}",
+                        session_id, successor_id, current_account_id
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "Autonomous hand-off failed for session {}: {}. Transitioning to RateLimited.",
+                        session_id, e
+                    );
+                    let _ = self.do_transition(
+                        &session_id,
+                        SessionState::RateLimited,
+                        "auto_failover",
+                    );
+                    let _ = self.emit(AgentEvent::new(
+                        EventKind::AccountSwitchFailed,
+                        Some(session_id.clone()),
+                        json!({ "reason": e.to_string() }),
+                        "auto_failover",
+                    ));
+                    let _ = self.emit(AgentEvent::new(
+                        EventKind::SessionHandOffFailed,
+                        Some(session_id.clone()),
+                        json!({ "reason": e.to_string() }),
+                        "auto_failover",
+                    ));
+                }
+            }
+        } else {
+            info!(
+                "Auto-failover disabled in config: transitioning session {} to RateLimited",
+                session_id
+            );
+            let _ = self.do_transition(&session_id, SessionState::RateLimited, "auto_failover");
         }
     }
 
@@ -2484,4 +2695,19 @@ impl SessionManagerHandle {
         })
         .await?
     }
+}
+
+/// Canonicalize provider names to account for legacy aliases.
+pub fn canonical_provider(p: &str) -> String {
+    let lower = p.to_lowercase();
+    match lower.as_str() {
+        "agy" | "antigravity" => "agy".to_string(),
+        "claude" | "claude-code" | "anthropic" => "claude".to_string(),
+        _ => lower,
+    }
+}
+
+/// Determine whether two provider strings represent the same provider.
+pub fn providers_match(a: &str, b: &str) -> bool {
+    canonical_provider(a) == canonical_provider(b)
 }

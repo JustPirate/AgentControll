@@ -404,6 +404,41 @@ impl AccountManager {
         Ok(false)
     }
 
+    /// Check all accounts in Cooldown or RateLimited state and expire any whose cooldown_until has passed.
+    /// Transitions them to Active, clears cooldown_until, and updates the database.
+    /// Returns the list of account IDs that transitioned back to Active.
+    pub fn maybe_expire_all_cooldowns(&mut self) -> Result<Vec<Id>> {
+        let now = Utc::now();
+        let mut expired_ids = Vec::new();
+        for account in self.accounts.values_mut() {
+            if matches!(
+                account.state,
+                AccountState::Cooldown | AccountState::RateLimited
+            ) {
+                if let Some(until) = account.cooldown_until {
+                    if until <= now {
+                        account.state = AccountState::Active;
+                        account.cooldown_until = None;
+                        account.updated_at = now;
+                        expired_ids.push(account.id.clone());
+                    }
+                }
+            }
+        }
+        for id in &expired_ids {
+            if let Some(account) = self.accounts.get(&id.0) {
+                self.store.update(account)?;
+                info!("Account {} cooldown expired → Active", id);
+            }
+        }
+        Ok(expired_ids)
+    }
+
+    /// Alias for `maybe_expire_all_cooldowns`.
+    pub fn expire_cooldowns(&mut self) -> Result<Vec<Id>> {
+        self.maybe_expire_all_cooldowns()
+    }
+
     // ── Session tracking ──────────────────────────────────────────────────
 
     /// Increment active_session_count when a session is assigned.
@@ -824,6 +859,31 @@ mod tests {
         let cleared = mgr.maybe_expire_cooldown(&id).unwrap();
         assert!(cleared);
         assert_eq!(mgr.get(&id).unwrap().state, AccountState::Active);
+    }
+
+    #[test]
+    fn expire_all_cooldowns_test() {
+        let mut mgr = manager();
+        let id1 = mgr.register(make_account("a", vec![])).unwrap();
+        let id2 = mgr.register(make_account("b", vec![])).unwrap();
+        let id3 = mgr.register(make_account("c", vec![])).unwrap();
+
+        let past = Utc::now() - Duration::seconds(10);
+        let future = Utc::now() + Duration::seconds(3600);
+
+        mgr.start_cooldown(&id1, past).unwrap();
+        mgr.apply_rate_limit(&id2, Some(past)).unwrap();
+        mgr.start_cooldown(&id3, future).unwrap();
+
+        let expired = mgr.maybe_expire_all_cooldowns().unwrap();
+        assert_eq!(expired.len(), 2);
+        assert!(expired.contains(&id1));
+        assert!(expired.contains(&id2));
+        assert!(!expired.contains(&id3));
+
+        assert_eq!(mgr.get(&id1).unwrap().state, AccountState::Active);
+        assert_eq!(mgr.get(&id2).unwrap().state, AccountState::Active);
+        assert_eq!(mgr.get(&id3).unwrap().state, AccountState::Cooldown);
     }
 
     #[test]

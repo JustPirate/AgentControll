@@ -122,7 +122,8 @@ async fn main() -> Result<()> {
     )
     .with_account_manager_handle(acct_handle.clone())
     .with_project_registry_handle(proj_handle.clone())
-    .with_interaction_hub(hub_handle.clone());
+    .with_interaction_hub(hub_handle.clone())
+    .with_auto_failover_config(&cfg.accounts.auto_failover);
 
     manager.recover_from_store()?;
     let mgr_handle = SessionManagerHandle::new(cmd_tx);

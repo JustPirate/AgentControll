@@ -384,12 +384,12 @@ pub fn parse_claude_event(line: &str) -> Option<AdapterEvent> {
                     .to_string();
                 Some(AdapterEvent::QuestionRaised { prompt })
             }
-            "rate_limit" => {
+            "rate_limit" | "rate_limit_error" | "quota_exhausted" | "quota_error" => {
                 let back_off_secs = val.get("back_off_secs").and_then(|v| v.as_u64());
                 Some(AdapterEvent::RateLimitSignal { back_off_secs })
             }
             "error" => {
-                // Check if this error represents rate-limiting
+                // Check if this error represents rate-limiting or quota exhaustion
                 let err_type = val
                     .get("error")
                     .and_then(|e| e.get("type"))
@@ -401,9 +401,15 @@ pub fn parse_claude_event(line: &str) -> Option<AdapterEvent> {
                     .and_then(|m| m.as_str())
                     .unwrap_or(trimmed);
 
+                let msg_lower = msg.to_lowercase();
                 if err_type == "rate_limit_error"
-                    || msg.contains("429")
-                    || msg.contains("rate limit")
+                    || err_type == "quota_error"
+                    || err_type == "quota_exhausted"
+                    || msg_lower.contains("429")
+                    || msg_lower.contains("rate limit")
+                    || msg_lower.contains("quota")
+                    || msg_lower.contains("resource has been exhausted")
+                    || msg_lower.contains("rate_limit_exceeded")
                 {
                     let back_off_secs = val
                         .get("back_off_secs")
@@ -764,7 +770,7 @@ impl ClaudeAdapter {
             )?
             .with_pattern(r"(?i)(Claude asks:|\?\s*$)", PtyPatternKind::QuestionRaised)?
             .with_pattern(
-                r"(?i)(rate limit exceeded|429 too many requests|quota exhausted)",
+                r"(?i)(rate limit|429|quota exhausted|resource has been exhausted|rate_limit_exceeded|quota exceeded)",
                 PtyPatternKind::RateLimitSignal {
                     back_off_secs: Some(30),
                 },

@@ -63,13 +63,24 @@ This roadmap documents future initiatives, planned enhancements, and architectur
 
 ---
 
+## Near-Term Enhancements (v1.4.0)
+
+### 10. Autonomous Quota Failover & Auto-Handoff on 429 [Completed]
+- Automatically detect when an active agent child process encounters an HTTP 429, rate limit signal, or quota exhaustion error across Claude Code, Subprocess Plugins, and Antigravity PTY sessions.
+- Automatically transition the exhausted account to `Cooldown` or `Exhausted` state with SQLite persistence.
+- Automatically trigger controlled session hand-off (`cmd_handoff_internal`) to the lowest active load backup account of the same provider without human intervention.
+- Seamlessly resume successor session in the exact same workspace with task prompts and snapshot context intact.
+- Validated with end-to-end real-world tests without mock data.
+
+---
+
 ## Long-Term Vision (v2.0.0)
 
-### 10. Remote Agent Execution & Multi-Node Clusters
+### 11. Remote Agent Execution & Multi-Node Clusters
 - Manage agent sessions running across cloud VMs, build servers, or local dev containers from a single local TUI.
 - Encrypted mTLS tunnel between the local CLI/TUI and remote `agentcontrold` instances.
 
-### 11. Web Console Companion
+### 12. Web Console Companion
 - Lightweight localhost web interface for monitoring complex multi-agent graphs and real-time diff inspections in browser tabs.
 
 ---
@@ -87,5 +98,6 @@ This roadmap documents future initiatives, planned enhancements, and architectur
 | Cryptographic Audit Signing | v1.3.0 (Completed) | Low-Medium | F7 / ADR-010 |
 | Cost Accounting & Token Budgets | v1.3.0 (Completed) | Medium | F6 |
 | Continuous Session Task Queue | v1.3.0 (Completed) | Medium | F11 |
+| Autonomous Quota Failover (429) | v1.4.0 (Completed) | Medium | Auto-Handoff |
 | Remote Cluster Execution | v2.0.0 | High | F1 |
 | Web Companion Dashboard | v2.0.0 | Medium | F3 |

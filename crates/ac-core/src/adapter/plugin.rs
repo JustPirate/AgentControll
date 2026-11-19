@@ -624,7 +624,7 @@ pub fn parse_plugin_event(line: &str) -> Option<AdapterEvent> {
                             return Some(AdapterEvent::QuestionRaised { prompt });
                         }
                     }
-                    "rate_limit" | "rate_limit_signal" => {
+                    "rate_limit" | "rate_limit_signal" | "quota_exhausted" | "quota_error" => {
                         let back_off_secs = obj.get("back_off_secs").and_then(|v| v.as_u64());
                         return Some(AdapterEvent::RateLimitSignal { back_off_secs });
                     }
@@ -649,6 +649,19 @@ pub fn parse_plugin_event(line: &str) -> Option<AdapterEvent> {
                             .or_else(|| obj.get("message"))
                             .and_then(|v| v.as_str())
                             .map(ToString::to_string);
+                        if let Some(ref r) = reason {
+                            let r_lower = r.to_lowercase();
+                            if r_lower.contains("429")
+                                || r_lower.contains("rate limit")
+                                || r_lower.contains("quota")
+                                || r_lower.contains("resource has been exhausted")
+                                || r_lower.contains("rate_limit_exceeded")
+                            {
+                                let back_off_secs =
+                                    obj.get("back_off_secs").and_then(|v| v.as_u64()).or(Some(60));
+                                return Some(AdapterEvent::RateLimitSignal { back_off_secs });
+                            }
+                        }
                         return Some(AdapterEvent::Crashed { exit_code, reason });
                     }
                     "snapshot_produced" => {
