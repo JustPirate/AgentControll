@@ -238,6 +238,17 @@ pub enum EventKind {
     TemplateCreated,
     TemplateUpdated,
     TemplateDeleted,
+    // v1.3.0: Cost & Budget events (F6)
+    TokenUsageRecorded,
+    BudgetWarningIssued,
+    BudgetExceeded,
+    BudgetUpdated,
+    // v1.3.0: Continuous Task Queue events (F11)
+    TaskEnqueued,
+    TaskStarted,
+    TaskCompleted,
+    TaskFailed,
+    TaskCancelled,
 }
 
 impl fmt::Display for EventKind {
@@ -266,6 +277,12 @@ pub struct AgentEvent {
     /// Who triggered this event: "human", "system", "adapter:<type>".
     pub triggered_by: String,
     pub timestamp: DateTime<Utc>,
+    /// SHA-256 hash of the previous event in the chain (64 hex characters or genesis).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_hash: Option<String>,
+    /// SHA-256 hash of this event: SHA-256(prev_hash || seq || timestamp || kind || payload).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
 }
 
 impl AgentEvent {
@@ -284,8 +301,162 @@ impl AgentEvent {
             payload,
             triggered_by: triggered_by.into(),
             timestamp: Utc::now(),
+            prev_hash: None,
+            hash: None,
         }
     }
+}
+
+// ── Cryptographic Audit Log Types (F7 / ADR-010) ──────────────────────────────
+
+/// Specific cryptographic integrity violation detected in the audit log.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum IntegrityViolation {
+    /// Payload, timestamp, kind, or sequence was modified in-place,
+    /// causing SHA-256(prev_hash || seq || ts || kind || payload) != stored hash.
+    HashMismatch {
+        seq: u64,
+        expected_hash: String,
+        actual_hash: String,
+    },
+    /// Row's prev_hash does not match the preceding row's stored hash.
+    BrokenChain {
+        seq: u64,
+        expected_prev_hash: String,
+        actual_prev_hash: String,
+    },
+    /// Monotonic sequence numbers have a gap (seq != expected_seq), indicating row deletion.
+    SequenceGap {
+        expected_seq: u64,
+        actual_seq: u64,
+    },
+    /// Event seq = 1 has invalid genesis prev_hash (not 64 zeros) or table starts at seq > 1.
+    InvalidGenesis {
+        seq: u64,
+        expected_prev_hash: String,
+        actual_prev_hash: String,
+    },
+}
+
+impl IntegrityViolation {
+    pub fn seq(&self) -> u64 {
+        match self {
+            Self::HashMismatch { seq, .. } => *seq,
+            Self::BrokenChain { seq, .. } => *seq,
+            Self::SequenceGap { actual_seq, .. } => *actual_seq,
+            Self::InvalidGenesis { seq, .. } => *seq,
+        }
+    }
+}
+
+impl std::fmt::Display for IntegrityViolation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::HashMismatch {
+                seq,
+                expected_hash,
+                actual_hash,
+            } => {
+                write!(
+                    f,
+                    "Hash mismatch at sequence {seq}: computed {expected_hash}, stored {actual_hash}"
+                )
+            }
+            Self::BrokenChain {
+                seq,
+                expected_prev_hash,
+                actual_prev_hash,
+            } => {
+                write!(
+                    f,
+                    "Broken hash chain at sequence {seq}: expected prev_hash {expected_prev_hash}, found {actual_prev_hash}"
+                )
+            }
+            Self::SequenceGap {
+                expected_seq,
+                actual_seq,
+            } => {
+                write!(
+                    f,
+                    "Sequence gap: expected sequence {expected_seq}, encountered {actual_seq}"
+                )
+            }
+            Self::InvalidGenesis {
+                seq,
+                expected_prev_hash,
+                actual_prev_hash,
+            } => {
+                write!(
+                    f,
+                    "Invalid genesis anchor at sequence {seq}: expected {expected_prev_hash}, found {actual_prev_hash}"
+                )
+            }
+        }
+    }
+}
+
+/// Cryptographic audit log integrity report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditIntegrityReport {
+    pub is_valid: bool,
+    pub total_events: u64,
+    pub verified_events: u64,
+    pub first_seq: Option<u64>,
+    pub last_seq: Option<u64>,
+    pub genesis_hash: Option<String>,
+    pub latest_hash: Option<String>,
+    pub violations: Vec<IntegrityViolation>,
+}
+
+pub type AuditVerificationReport = AuditIntegrityReport;
+
+// ── Cost & Token Budget Types (F6) ──────────────────────────────────────────
+
+/// Token usage record stored in `cost.db`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TokenUsageRecord {
+    pub id: String,
+    pub session_id: String,
+    pub project_id: Option<String>,
+    pub account_id: Option<String>,
+    pub model: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub cost_usd: f64,
+    pub timestamp: String,
+}
+
+/// Budget configuration record stored in `cost.db`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BudgetRecord {
+    pub scope: String,
+    pub daily_max_usd: Option<f64>,
+    pub session_max_usd: Option<f64>,
+    pub warning_threshold: f64,
+    pub enforcement_action: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+// ── Continuous Session Task Queue Types (F11) ────────────────────────────────
+
+/// Task queue backlog item stored in `queue.db`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QueuedTaskRecord {
+    pub id: String,
+    pub title: String,
+    pub prompt: Option<String>,
+    pub priority: i32,
+    pub status: String,
+    pub session_id: Option<String>,
+    pub project_id: Option<String>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+    pub error: Option<String>,
 }
 
 // ── Control API wire types ────────────────────────────────────────────────────

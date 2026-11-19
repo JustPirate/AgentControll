@@ -410,7 +410,7 @@ pub async fn dispatch_request_full(
         "project" => handle_project_cmd(req, project_registry).await,
         "interaction" => handle_interaction_cmd(req, session_mgr, interaction_hub).await,
         "policy" => handle_policy_cmd(req, policy_engine, interaction_hub).await,
-        "audit" => handle_audit_cmd(req, policy_engine, interaction_hub).await,
+        "audit" => handle_audit_cmd(req, policy_engine, interaction_hub, session_mgr).await,
         "notification" => handle_notification_cmd(req, notification_handle).await,
         "events" => {
             if req.cmd == "events.query" {
@@ -1543,8 +1543,15 @@ pub async fn handle_audit_cmd(
     req: &ApiRequest,
     engine_opt: &Option<PolicyEngineHandle>,
     hub_opt: &Option<InteractionHubHandle>,
+    session_mgr: &SessionManagerHandle,
 ) -> ApiResponse {
     match req.cmd.as_str() {
+        "audit.verify" => match session_mgr.verify_audit().await {
+            Ok(report) => {
+                ApiResponse::ok(&req.id, serde_json::to_value(report).unwrap_or_default())
+            }
+            Err(e) => ApiResponse::err(&req.id, "InternalError", e.to_string()),
+        },
         "audit.list" | "audit.query" => {
             let session_id = req.params["session_id"].as_str().map(Id::from);
             let limit = req.params["limit"].as_u64();

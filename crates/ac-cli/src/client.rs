@@ -11,8 +11,8 @@ use tokio::{
 use tracing::debug;
 
 use ac_core::types::{
-    Account, AgentEvent, AgentSession, ApiRequest, ApiResponse, Id, Project, SessionTemplate,
-    SubscriptionFilter,
+    Account, AgentEvent, AgentSession, ApiRequest, ApiResponse, AuditIntegrityReport, Id, Project,
+    SessionTemplate, SubscriptionFilter,
 };
 
 #[derive(Debug, Clone)]
@@ -690,6 +690,20 @@ impl DaemonClient {
             }),
         )
         .await
+    }
+
+    /// Cryptographically verify audit log hash chain via the daemon (F7 / ADR-010).
+    pub async fn verify_audit(&self) -> Result<AuditIntegrityReport> {
+        let resp = self.send_command("audit.verify", json!({})).await?;
+        if !resp.ok {
+            let msg = resp
+                .error
+                .map(|e| e.message)
+                .unwrap_or_else(|| "Unknown error".into());
+            anyhow::bail!("Daemon audit verification failed: {msg}");
+        }
+        serde_json::from_value(resp.result.unwrap_or(serde_json::Value::Null))
+            .context("Failed to deserialize AuditIntegrityReport from daemon")
     }
 }
 

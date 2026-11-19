@@ -220,26 +220,23 @@ state.
 
 ## ADR-010 — Event log checksum / integrity verification
 
-**Status:** Open — informational, no phase blocker
+**Status:** Accepted — implemented in v1.3.0 (Milestone 1 / 2026-11-18)
 
-**Decision pending:** Should the event log include periodic checksums or
-signatures to detect offline tampering?
+**Decision:** The SQLite `events` table includes `prev_hash` and `hash` columns
+forming an unbroken SHA-256 hash chain computed via:
+`SHA-256(prev_hash || sequence_number || timestamp || event_type || payload)`.
 
-**Context:** Sequence-number gaps are already detectable. The question is
-whether to go further with cryptographic integrity (e.g. hash-chaining each
-event record).
+- **Genesis anchor**: For `seq == 1`, `prev_hash` is 64 hex zeros (`"0000000000000000000000000000000000000000000000000000000000000000"`).
+- **Subsequent events**: `prev_hash` equals the stored `hash` of `seq - 1`.
+- **In-memory cache**: `EventStore` caches `last_seq` and `last_hash` on open to ensure O(1) append throughput without repeated queries.
+- **Automated migration**: Schema version bumped from 1 to 2. Opening an existing v1 database automatically alters the table to add columns and sequentially backfills hash chains inside a single atomic transaction.
+- **Verification engine**: `EventStore::verify_hash_chain(&self)` and static `EventStore::verify_audit_log_at_path(path: &Path)` open databases read-only (`SQLITE_OPEN_READ_ONLY | SQLITE_OPEN_NO_MUTEX`), verifying sequence continuity, genesis anchor, chain linkage, cryptographic hashes (with error resynchronization), and snapshot tail truncation.
+- **CLI & IPC**: Daemon IPC command `audit.verify` and CLI subcommand `ac audit verify [--db <path>] [--offline] [--json] [--plain]` provide operator inspection, exiting with code 0 on valid logs and code 1 on detected tampering.
 
-**Options:**
-
-| Option | Pros | Cons |
-|---|---|---|
-| Sequence-number gap detection only | Already implemented as part of ADR-002; simple | Does not detect value tampering (only deletion) |
-| Hash-chained records | Detects any record modification | 10–20% write overhead; complexity in migration |
-| Periodic checkpoint signatures | Lightweight; operator-verifiable | Gaps between checkpoints are not covered |
-
-**Note:** Cryptographic signing of the audit log is listed as a future extension
-in [`FUTURE.md`](FUTURE.md). The baseline (gap detection) is sufficient for
-v1.
+**Context:** Sequence-number gaps were detectable in earlier versions, but did
+not detect value alterations or hash forgery. Cryptographic hash chaining provides
+full integrity assurance against row deletion, in-place alteration, forged hashes,
+and tail truncation.
 
 ---
 
@@ -393,7 +390,7 @@ transition.
 | ~~ADR-007~~ | ~~Implementation language and TUI framework~~ | ~~Phase 1~~ — **Resolved: Rust + Ratatui** |
 | ~~ADR-008~~ | ~~Static vs. dynamic adapter loading~~ | ~~Phase 4~~ — **Resolved: static linking** |
 | ~~ADR-009~~ | ~~WebSocket transport architecture~~ | ~~Phase 7~~ — **Resolved: accepted** |
-| ADR-010 | Event log integrity verification | No blocker |
+| ~~ADR-010~~ | ~~Event log integrity verification~~ | ~~No blocker~~ — **Resolved: accepted (SHA-256 hash chaining & verification)** |
 | ~~ADR-011~~ | ~~`Idle → Stopped` direct transition~~ | ~~Phase 1~~ — **Resolved: accepted** |
 | ~~ADR-012~~ | ~~Policy evaluation precedence & determinism~~ | ~~Phase 3~~ — **Resolved: accepted** |
 | ~~ADR-013~~ | ~~Multi-account switching & controlled hand-off~~ | ~~Phase 6~~ — **Resolved: accepted** |

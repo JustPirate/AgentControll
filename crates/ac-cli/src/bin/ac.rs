@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::io::IsTerminal;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::UnixStream,
@@ -98,6 +98,27 @@ enum Commands {
     Tui,
     /// Launch the interactive Ratatui TUI dashboard (alias for tui).
     Dashboard,
+    /// Cost accounting and token expenditure commands (Feature F6).
+    Cost {
+        /// Filter by session ID.
+        #[arg(long)]
+        session: Option<String>,
+        /// Filter by project ID.
+        #[arg(long)]
+        project: Option<String>,
+        /// Filter by account ID.
+        #[arg(long)]
+        account: Option<String>,
+        /// Output in structured JSON format.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Spending budget configuration and inspection (Feature F6).
+    #[command(subcommand)]
+    Budget(BudgetCmd),
+    /// Continuous session task backlog and queue management (Feature F11).
+    #[command(subcommand)]
+    Queue(QueueCmd),
     /// Diagnose AgentControll installation, configuration, Antigravity integration, accounts, profiles, and sessions.
     Doctor {
         /// Perform additional safe deep diagnostics.
@@ -123,6 +144,74 @@ enum NotificationCmd {
     },
     /// Inspect notification configuration and delivery metrics.
     Status,
+}
+
+/// Budget configuration and management subcommands (Feature F6).
+#[derive(Subcommand, Debug, Clone, PartialEq)]
+enum BudgetCmd {
+    /// Configure spending budget caps.
+    Set {
+        /// Scope identifier (e.g. 'global', 'session:<id>', 'project:<id>').
+        #[arg(long, default_value = "global")]
+        scope: String,
+        /// Maximum daily spend limit in USD.
+        #[arg(long)]
+        daily: Option<f64>,
+        /// Maximum per-session spend limit in USD.
+        #[arg(long)]
+        session: Option<f64>,
+    },
+    /// Inspect budget configuration and current status.
+    Get {
+        /// Scope identifier (defaults to 'global').
+        #[arg(long, default_value = "global")]
+        scope: String,
+        /// Output in JSON format.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List all configured budgets.
+    List {
+        /// Output in JSON format.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect budget exhaustion status and current spend.
+    Status {
+        /// Output in JSON format.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// Continuous task backlog and queue management subcommands (Feature F11).
+#[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
+enum QueueCmd {
+    /// Enqueue a new task into the continuous execution queue.
+    Add {
+        /// Title or task description.
+        title: String,
+        /// Initial task prompt or instructions for the agent.
+        #[arg(long)]
+        prompt: Option<String>,
+        /// Task scheduling priority (higher numbers execute first, default 0).
+        #[arg(long, default_value = "0")]
+        priority: i32,
+        /// Project ID to bind to this task.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// List queued tasks ordered by priority descending.
+    List {
+        /// Output in JSON format.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cancel a pending or running task in the queue.
+    Cancel {
+        /// Task ID (ULID) to cancel.
+        task_id: String,
+    },
 }
 
 /// Conversation inspection and discovery subcommands.
@@ -544,7 +633,7 @@ enum PolicyCmd {
     },
 }
 
-/// Audit log subcommands (Phase 3).
+/// Audit log subcommands (Phase 3 & Milestone 1).
 #[derive(Subcommand)]
 enum AuditCmd {
     /// List audit log entries.
@@ -555,6 +644,24 @@ enum AuditCmd {
         /// Maximum number of entries to return.
         #[arg(short, long, default_value = "50")]
         limit: u64,
+    },
+    /// Cryptographically verify the SHA-256 hash-chain integrity of the audit log (F7 / ADR-010).
+    Verify {
+        /// Optional path to SQLite database (defaults to daemon config path).
+        #[arg(long)]
+        db: Option<PathBuf>,
+
+        /// Force direct offline SQLite inspection, bypassing daemon IPC.
+        #[arg(long)]
+        offline: bool,
+
+        /// Output verification report in JSON format.
+        #[arg(long)]
+        json: bool,
+
+        /// Output plain tab-delimited text without headers or dividers.
+        #[arg(long, short = 'p')]
+        plain: bool,
     },
 }
 
@@ -713,6 +820,220 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    if let Commands::Audit(AuditCmd::Verify {
+        ref db,
+        offline,
+        json: sub_json,
+        plain: sub_plain,
+    }) = cli.command
+    {
+        let is_json = cli.json || sub_json;
+        let is_plain = cli.plain || sub_plain;
+
+        let db_path = match db {
+            Some(p) => p.clone(),
+            None => ac_core::config::Config::default().db_path,
+        };
+
+        let report = if db.is_some() || offline {
+            // Direct read-only offline SQLite verification
+            ac_core::event_store::EventStore::verify_audit_log_at_path(&db_path)?
+        } else {
+            // Attempt verification via daemon IPC first
+            let client = ac_cli::client::DaemonClient::new(cli.socket.clone());
+            match client.verify_audit().await {
+                Ok(rep) => rep,
+                Err(_) => {
+                    // Daemon socket is unreachable; fallback to direct offline inspection
+                    ac_core::event_store::EventStore::verify_audit_log_at_path(&db_path)?
+                }
+            }
+        };
+
+        render_audit_report(&report, &db_path, is_json, is_plain)?;
+
+        if !report.is_valid {
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
+
+    let resolve_data_dir = || -> PathBuf {
+        if let Some(parent) = cli.socket.parent() {
+            if parent.join("cost.db").exists()
+                || parent.join("queue.db").exists()
+                || parent.join("events.db").exists()
+            {
+                return parent.to_path_buf();
+            }
+        }
+        let cfg = ac_core::config::Config::default();
+        if let Some(p) = cfg.db_path.parent() {
+            p.to_path_buf()
+        } else {
+            PathBuf::from(".")
+        }
+    };
+
+    if let Commands::Cost {
+        ref session,
+        ref project,
+        ref account,
+        json: sub_json,
+    } = cli.command
+    {
+        let is_json = cli.json || sub_json;
+        let data_dir = resolve_data_dir();
+        let cost_db_path = data_dir.join("cost.db");
+        let store = ac_core::CostStore::open(&cost_db_path)?;
+        let records = store.query_records(session.as_deref(), project.as_deref(), account.as_deref())?;
+        let total_spend = store.get_total_spend(session.as_deref())?;
+
+        if is_json {
+            let json_out = if let Some(ref sid) = session {
+                let cost_val = records.first().map(|r| r.cost_usd).unwrap_or(total_spend);
+                json!({
+                    "session_id": sid,
+                    "cost_usd": cost_val,
+                    "total_cost_usd": total_spend,
+                    "records": records,
+                })
+            } else {
+                json!({
+                    "total_cost_usd": total_spend,
+                    "records": records,
+                })
+            };
+            println!("{}", serde_json::to_string_pretty(&json_out)?);
+        } else if records.is_empty() {
+            println!("No token usage records found. Total spend: ${:.4}", total_spend);
+        } else {
+            println!("{:<24} {:<18} {:<10} {:<10} {:<12} {:<10}", "SESSION", "MODEL", "PROMPT", "COMPLETION", "CACHE R/W", "COST ($)");
+            println!("{:-<24} {:-<18} {:-<10} {:-<10} {:-<12} {:-<10}", "", "", "", "", "", "");
+            for r in &records {
+                let cache_str = format!("{}/{}", r.cache_read_tokens, r.cache_write_tokens);
+                println!("{:<24} {:<18} {:<10} {:<10} {:<12} ${:<9.4}", r.session_id, r.model, r.prompt_tokens, r.completion_tokens, cache_str, r.cost_usd);
+            }
+            println!("\nTotal spend: ${:.4}", total_spend);
+        }
+        return Ok(());
+    }
+
+    if let Commands::Budget(ref b) = cli.command {
+        let is_json = cli.json;
+        let data_dir = resolve_data_dir();
+        let cost_db_path = data_dir.join("cost.db");
+        let store = ac_core::CostStore::open(&cost_db_path)?;
+
+        match b {
+            BudgetCmd::Set { scope, daily, session } => {
+                if let Some(d) = daily {
+                    if *d < 0.0 {
+                        eprintln!("error: daily budget limit cannot be negative ({d})");
+                        std::process::exit(1);
+                    }
+                }
+                if let Some(s) = session {
+                    if *s < 0.0 {
+                        eprintln!("error: session budget limit cannot be negative ({s})");
+                        std::process::exit(1);
+                    }
+                }
+                store.set_budget(scope, *daily, *session)?;
+                if is_json {
+                    println!("{}", json!({ "status": "ok", "scope": scope, "daily_max_usd": daily, "session_max_usd": session }));
+                } else {
+                    println!("Budget configured for scope '{scope}': daily = {:?}, session = {:?}", daily, session);
+                }
+            }
+            BudgetCmd::Get { scope, json: sub_json } => {
+                let budget = store.get_budget(scope)?;
+                if is_json || *sub_json {
+                    println!("{}", serde_json::to_string_pretty(&budget)?);
+                } else if let Some(b) = budget {
+                    println!("Budget [{}]", b.scope);
+                    println!("  Daily limit:   {:?}", b.daily_max_usd);
+                    println!("  Session limit: {:?}", b.session_max_usd);
+                    println!("  Threshold:     {:.0}%", b.warning_threshold * 100.0);
+                } else {
+                    println!("No budget found for scope '{scope}'");
+                }
+            }
+            BudgetCmd::List { json: sub_json } => {
+                let budgets = store.list_budgets()?;
+                if is_json || *sub_json {
+                    println!("{}", serde_json::to_string_pretty(&budgets)?);
+                } else if budgets.is_empty() {
+                    println!("No budgets configured.");
+                } else {
+                    println!("{:<20} {:<16} {:<16} {:<10}", "SCOPE", "DAILY MAX ($)", "SESSION MAX ($)", "ACTION");
+                    println!("{:-<20} {:-<16} {:-<16} {:-<10}", "", "", "", "");
+                    for b in budgets {
+                        let daily_str = b.daily_max_usd.map(|v| format!("${:.2}", v)).unwrap_or_else(|| "unlimited".into());
+                        let sess_str = b.session_max_usd.map(|v| format!("${:.2}", v)).unwrap_or_else(|| "unlimited".into());
+                        println!("{:<20} {:<16} {:<16} {:<10}", b.scope, daily_str, sess_str, b.enforcement_action);
+                    }
+                }
+            }
+            BudgetCmd::Status { json: sub_json } => {
+                let total = store.get_total_spend(None)?;
+                let budgets = store.list_budgets()?;
+                if is_json || *sub_json {
+                    println!("{}", json!({ "total_spend_usd": total, "budgets": budgets }));
+                } else {
+                    println!("Cumulative Total Spend: ${:.4}", total);
+                    for b in budgets {
+                        println!("- Scope '{}': Daily limit {:?}", b.scope, b.daily_max_usd);
+                    }
+                }
+            }
+        }
+        return Ok(());
+    }
+
+    if let Commands::Queue(ref q) = cli.command {
+        let is_json = cli.json;
+        let data_dir = resolve_data_dir();
+        let queue_db_path = data_dir.join("queue.db");
+        let store = ac_core::QueueStore::open(&queue_db_path)?;
+
+        match q {
+            QueueCmd::Add { title, prompt, priority, project } => {
+                let task_id = store.enqueue(title, prompt.as_deref(), *priority, project.as_deref())?;
+                if is_json {
+                    println!("{}", json!({ "id": task_id, "title": title, "priority": priority, "status": "pending" }));
+                } else {
+                    println!("Enqueued task '{task_id}': {title} (priority: {priority})");
+                }
+            }
+            QueueCmd::List { json: sub_json } => {
+                let tasks = store.list()?;
+                if is_json || *sub_json {
+                    println!("{}", serde_json::to_string_pretty(&tasks)?);
+                } else if tasks.is_empty() {
+                    println!("No tasks in queue.");
+                } else {
+                    println!("{:<26} {:<12} {:<8} {}", "TASK ID", "STATUS", "PRIORITY", "TITLE");
+                    println!("{:-<26} {:-<12} {:-<8} {:-<30}", "", "", "", "");
+                    for t in tasks {
+                        println!("{:<26} {:<12} {:<8} {}", t.id, t.status, t.priority, t.title);
+                    }
+                }
+            }
+            QueueCmd::Cancel { task_id } => {
+                let ok = store.cancel(task_id)?;
+                if is_json {
+                    println!("{}", json!({ "task_id": task_id, "cancelled": ok }));
+                } else if ok {
+                    println!("Cancelled task '{task_id}'");
+                } else {
+                    println!("Task '{task_id}' not found or already completed");
+                }
+            }
+        }
+        return Ok(());
+    }
+
     let (cmd, params) = build_request(&cli.command)?;
 
     if cmd == "events.subscribe" {
@@ -812,7 +1133,13 @@ fn build_request(commands: &Commands) -> Result<(String, serde_json::Value)> {
                 }),
             ),
         },
-        Commands::Tui | Commands::Dashboard | Commands::Login { .. } | Commands::Doctor { .. } => {
+        Commands::Tui
+        | Commands::Dashboard
+        | Commands::Login { .. }
+        | Commands::Doctor { .. }
+        | Commands::Cost { .. }
+        | Commands::Budget(_)
+        | Commands::Queue(_) => {
             unreachable!()
         }
 
@@ -1291,6 +1618,7 @@ fn build_request(commands: &Commands) -> Result<(String, serde_json::Value)> {
                 "audit.list".to_owned(),
                 json!({ "session_id": session_id, "limit": limit }),
             ),
+            AuditCmd::Verify { .. } => unreachable!(),
         },
 
         Commands::Events(e) => match e {
@@ -1372,6 +1700,77 @@ async fn subscribe_events(socket_path: &PathBuf) -> Result<()> {
 }
 
 // ── Output formatting ─────────────────────────────────────────────────────────
+
+fn render_audit_report(
+    report: &ac_core::types::AuditIntegrityReport,
+    db_path: &Path,
+    is_json: bool,
+    is_plain: bool,
+) -> Result<()> {
+    if is_json {
+        println!("{}", serde_json::to_string_pretty(report)?);
+        return Ok(());
+    }
+
+    if is_plain {
+        println!("STATUS\tTOTAL\tFIRST_SEQ\tLAST_SEQ\tVIOLATIONS");
+        println!(
+            "{}\t{}\t{}\t{}\t{}",
+            if report.is_valid { "VALID" } else { "CORRUPTED" },
+            report.total_events,
+            report
+                .first_seq
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "-".into()),
+            report
+                .last_seq
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "-".into()),
+            report.violations.len()
+        );
+        for v in &report.violations {
+            println!("{}\t{}", v.seq(), v);
+        }
+        return Ok(());
+    }
+
+    // Structured human-readable terminal output
+    println!("Audit Log Hash-Chain Integrity Report:");
+    println!("  Database:        {}", db_path.display());
+    println!(
+        "  Status:          {}",
+        if report.is_valid {
+            "VALID"
+        } else {
+            "CORRUPTED / TAMPERED"
+        }
+    );
+    println!("  Schema Version:  {}", ac_core::event_store::SCHEMA_VERSION);
+    println!("  Total Events:    {}", report.total_events);
+    println!("  Verified Events: {}", report.verified_events);
+    if let (Some(first), Some(last)) = (report.first_seq, report.last_seq) {
+        println!("  Sequence Range:  {} .. {}", first, last);
+    } else {
+        println!("  Sequence Range:  None");
+    }
+    if let Some(genesis) = &report.genesis_hash {
+        println!("  Genesis Hash:    {}", genesis);
+    }
+    if let Some(latest) = &report.latest_hash {
+        println!("  Latest Hash:     {}", latest);
+    }
+    println!("  Violations:      {}", report.violations.len());
+
+    if !report.violations.is_empty() {
+        println!();
+        println!("INTEGRITY VIOLATIONS DETECTED:");
+        for (i, v) in report.violations.iter().enumerate() {
+            println!("  [{}] {}", i + 1, v);
+        }
+    }
+
+    Ok(())
+}
 
 fn print_response(resp: &ApiResponse, plain: bool) {
     if resp.ok {

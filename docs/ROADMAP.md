@@ -40,13 +40,36 @@ This roadmap documents future initiatives, planned enhancements, and architectur
 
 ---
 
+## Mid-Term Roadmap (v1.3.0)
+
+### 7. Cryptographic Audit Log Signing (F7 / ADR-010) [Completed]
+- Tamper-proof SQLite event store with incremental SHA-256 hash chaining (`prev_hash`, `hash`) and genesis anchoring.
+- Automated v1-to-v2 schema migration with transactional backfill of legacy events.
+- Verification command `ac audit verify` detecting payload modifications, forged hashes, and deleted sequence gaps.
+- **Status**: Completed (v1.3.0) — Delivered `EventStore` cryptographic hash chain, `AuditIntegrityReport`, `ac audit verify` CLI, and 10 dedicated CLI tests (`audit_cli_tests.rs`).
+
+### 8. Cost Accounting & Token Budget Enforcement (F6) [Completed]
+- Track prompt, completion, and cache tokens across Claude, Gemini, OpenAI, and plugin models with built-in pricing tables.
+- Persistent `cost.db` storing token usage records and configurable daily/session budget limits.
+- Automatic 80% early warning event emission and 100% pause limit enforcement.
+- CLI inspection via `ac cost` and budget configuration via `ac budget set/get/list/status`.
+- **Status**: Completed (v1.3.0) — Delivered pricing engine (`cost.rs`), SQLite cost store (`cost_store.rs`), and CLI commands.
+
+### 9. Continuous Session Task Queue (F11) [Completed]
+- Autonomous execution of multi-task backlogs using persistent `queue.db` in SQLite.
+- Strict priority scheduling (`priority DESC, created_at ASC`) and deterministic FIFO execution.
+- CLI task management via `ac queue add`, `ac queue list`, and `ac queue cancel`.
+- **Status**: Completed (v1.3.0) — Delivered `QueueStore` (`queue_store.rs`), priority scheduler, CLI commands, and autonomous successor pipeline.
+
+---
+
 ## Long-Term Vision (v2.0.0)
 
-### 7. Remote Agent Execution & Multi-Node Clusters
+### 10. Remote Agent Execution & Multi-Node Clusters
 - Manage agent sessions running across cloud VMs, build servers, or local dev containers from a single local TUI.
 - Encrypted mTLS tunnel between the local CLI/TUI and remote `agentcontrold` instances.
 
-### 8. Web Console Companion
+### 11. Web Console Companion
 - Lightweight localhost web interface for monitoring complex multi-agent graphs and real-time diff inspections in browser tabs.
 
 ---
@@ -61,5 +84,8 @@ This roadmap documents future initiatives, planned enhancements, and architectur
 | Linux Landlock Sandboxing | v1.2.0 (Completed) | High | F4 |
 | Webhook Alert Dispatcher | v1.2.0 (Completed) | Low | F8 |
 | Subprocess Adapter Plugins | v1.2.0 (Completed) | High | F5 / ADR-008 |
+| Cryptographic Audit Signing | v1.3.0 (Completed) | Low-Medium | F7 / ADR-010 |
+| Cost Accounting & Token Budgets | v1.3.0 (Completed) | Medium | F6 |
+| Continuous Session Task Queue | v1.3.0 (Completed) | Medium | F11 |
 | Remote Cluster Execution | v2.0.0 | High | F1 |
 | Web Companion Dashboard | v2.0.0 | Medium | F3 |

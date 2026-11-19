@@ -41,6 +41,7 @@ libc = { workspace = true }
 # Core types shared with the daemon
 ac-core = { path = "../ac-core" }
 ac-tui = { path = "../ac-tui" }
+sha2 = "0.10.9"
 
 [dev-dependencies]
 base64 = "0.22.1"

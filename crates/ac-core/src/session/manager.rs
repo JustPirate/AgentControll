@@ -17,8 +17,9 @@ use crate::{
     project_registry::{ProjectRegistry, ProjectRegistryHandle},
     session::state_machine,
     types::{
-        AccountSwitchMode, AdapterEvent, AgentCommand, AgentEvent, AgentSession, EventKind, Id,
-        Interaction, PolicyDecision, SessionSnapshot, SessionState,
+        AccountSwitchMode, AdapterEvent, AgentCommand, AgentEvent, AgentSession,
+        AuditIntegrityReport, EventKind, Id, Interaction, PolicyDecision, SessionSnapshot,
+        SessionState,
     },
 };
 
@@ -133,6 +134,10 @@ pub enum SessionCmd {
         session_id: Id,
         target_account_id: Option<Id>,
         reply: tokio::sync::oneshot::Sender<Result<Id>>,
+    },
+    /// Verify cryptographic hash-chain integrity of the event store (F7 / ADR-010).
+    VerifyAudit {
+        reply: tokio::sync::oneshot::Sender<Result<AuditIntegrityReport>>,
     },
 }
 
@@ -474,6 +479,10 @@ impl SessionManager {
                 reply,
             } => {
                 let result = self.store.query(since_seq, session_id.as_ref(), limit);
+                let _ = reply.send(result);
+            }
+            SessionCmd::VerifyAudit { reply } => {
+                let result = self.store.verify_hash_chain();
                 let _ = reply.send(result);
             }
             SessionCmd::SelectAccount {
@@ -2432,6 +2441,12 @@ impl SessionManagerHandle {
             reply,
         })
         .await?
+    }
+
+    /// Verify cryptographic hash-chain integrity of the event store (F7 / ADR-010).
+    pub async fn verify_audit(&self) -> Result<AuditIntegrityReport> {
+        self.send_and_wait(|reply| SessionCmd::VerifyAudit { reply })
+            .await?
     }
 
     /// Phase 6: Explicitly select an account for an Idle session.

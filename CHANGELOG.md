@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Cryptographic Audit Log Signing (F7 / ADR-010)**: Tamper-proof SQLite event store with incremental SHA-256 hash chaining (`prev_hash`, `hash`) and genesis anchoring.
+  - **SHA-256 Chaining Engine (`crates/ac-core/src/event_store.rs`)**: Canonical hash formula `SHA-256(prev_hash || sequence_number || timestamp || event_type || payload)` with genesis anchor (64 hex zeros).
+  - **Schema v2 & Auto-Migration**: Upgraded SQLite `events` table to schema version 2; automatically alters legacy databases and backfills hash chains inside a single atomic transaction.
+  - **Integrity Verification**: `EventStore::verify_hash_chain` and `EventStore::verify_audit_log_at_path` detecting row modifications (`HashMismatch`), hash forgery (`BrokenChain`), deletions (`SequenceGap`), and invalid anchors (`InvalidGenesis`).
+  - **CLI & IPC**: Subcommand `ac audit verify [--db <path>] [--offline] [--json] [--plain]` and IPC method `audit.verify`.
+- **Cost Accounting & Token Budget Enforcement (F6)**: Real-time token consumption tracking and budget cap enforcement across LLM providers.
+  - **Token Usage Engine (`crates/ac-core/src/cost.rs`)**: Computes exact USD costs across Claude (Sonnet, Opus, Haiku), Gemini (Flash, Pro), OpenAI (GPT-4o, mini), and custom plugin models with differential prompt, completion, and cache read/write rates.
+  - **Persistent Cost Storage (`crates/ac-core/src/cost_store.rs`)**: Dedicated SQLite database `cost.db` storing granular `token_usage` records and configurable daily/session spending caps in `budgets`.
+  - **Budget Enforcement**: Threshold alerts issuing `BudgetWarningIssued` events at 80% spend and `BudgetExceeded` pauses at 100% spend.
+  - **CLI Management**: Added `ac cost [--session <id>] [--project <id>] [--account <id>] [--json]` and `ac budget <set|get|list|status>` commands with negative value validation.
+- **Continuous Session Task Queue (F11)**: Autonomous multi-task backlog execution with persistent priority scheduling.
+  - **Task Backlog Storage (`crates/ac-core/src/queue_store.rs`)**: Dedicated SQLite database `queue.db` tracking tasks with priority, status (`pending`, `running`, `completed`, `failed`, `cancelled`), timestamps, and error diagnostics.
+  - **Priority Scheduler**: Deterministic ordering via `ORDER BY priority DESC, created_at ASC` ensuring highest-priority items dispatch first, with FIFO execution for equal-priority tasks.
+  - **CLI Management**: Added `ac queue <add|list|cancel>` commands with interactive table and structured JSON outputs.
 - **Dynamic Subprocess Adapter Plugins (F5 / ADR-008)**: Out-of-process dynamic agent adapter framework enabling third-party coding agents (e.g., Devin, Codex CLI, custom enterprise agents) to integrate into `agentcontrold` without daemon recompilation via standard NDJSON / JSON-RPC streams (`feat(adapter): dynamic subprocess adapter plugins via NDJSON/JSON-RPC`).
   - **Subprocess Adapter Engine (`crates/ac-core/src/adapter/plugin.rs`)**: Implemented `SubprocessAdapter` orchestrating external executable lifecycles over standard I/O pipes. Spawns dedicated background Tokio tasks for stdin command dispatch (`cmd_task`), stdout event ingestion (`stdout_task`), stderr tail monitoring (`stderr_task`), and exit status observation (`monitor_task`).
   - **TOML Configuration Schema (`crates/ac-core/src/config.rs`)**: Added `PluginConfig` and `PluginCapabilitiesConfig` loaded via `[[plugins]]` array in `config.toml`. Supports executable path resolution against system `PATH`, command arguments, custom environment variables, routed `agent_types`, and granular capabilities (`switch_mode`, `supports_session_resume`, `supports_snapshot_restore`, `requires_process_restart`, `supports_pty`, `supports_auto_accept`, `models`) with validation preventing duplicate names or colliding agent types.

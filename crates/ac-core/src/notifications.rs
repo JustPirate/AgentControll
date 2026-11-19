@@ -1150,6 +1150,8 @@ mod tests {
             payload,
             triggered_by: "test_runner".to_string(),
             timestamp: Utc::now(),
+            prev_hash: None,
+            hash: None,
         }
     }
 

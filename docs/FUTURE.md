@@ -111,17 +111,17 @@ budget enforcement engine — more scope than v1 warrants.
 
 ## F7 — Cryptographic audit log signing
 
-**What:** Hash-chain or digitally sign every event record so that any
-modification to the audit trail is cryptographically detectable, even by the
-process owner.
+**Status:** Implemented in v1.3.0 (Milestone 1 / ADR-010).
 
-**Why deferred:** v1 uses sequence-number gap detection only (see ADR-010).
-Cryptographic signing adds write overhead and complexity.
+**What:** Every event record in the SQLite `events` table is hash-chained using
+SHA-256 (`prev_hash`, `hash`) following the canonical formula:
+`SHA-256(prev_hash || sequence_number || timestamp || event_type || payload)`.
 
-**Design constraints on v1:**
-- Event records have a stable schema and a monotonic sequence number. Adding
-  a `prev_hash` column and a `hash` column per record is a backwards-compatible
-  schema extension.
+**Implementation details:**
+- Monotonic sequence numbers and deterministic string serialization ensure reproducibility.
+- Genesis event (`seq == 1`) anchors to 64 hexadecimal zeros (`0000000000000000000000000000000000000000000000000000000000000000`).
+- Schema version 2 with automated transactional backfill of legacy unhashed rows.
+- Operator verification via `ac audit verify [--db <path>] [--offline] [--json] [--plain]` and daemon IPC `audit.verify`, returning structured `AuditIntegrityReport` and detecting payload modifications, hash forgery, sequence gaps, missing genesis, and tail truncation.
 
 ---
 
@@ -222,7 +222,7 @@ owns the notification and mobile UX layer.
 | F4 | Filesystem sandboxing | Adapter process spawn model |
 | F5 | Dynamic adapter plugins | ABI stability; security review |
 | F6 | Cost accounting | Provider pricing data; budget enforcement |
-| F7 | Cryptographic audit signing | Event schema extension; ADR-010 |
+| F7 | Cryptographic audit signing | Implemented (v1.3.0 M1; ADR-010) |
 | F8 | AgentDesk integration | No v1 changes needed |
 | F9 | AgentMesh integration | No v1 changes needed |
 | F10 | Session templates | Post-MVP convenience |
