@@ -6,9 +6,9 @@
 [![Rust](https://img.shields.io/badge/Rust-1.80%2B-orange.svg)](https://www.rust-lang.org)
 [![NPM](https://img.shields.io/npm/v/agentcontroll.svg?style=flat&logo=npm)](https://www.npmjs.com/package/agentcontroll)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS-brightgreen.svg)]()
-[![Status](https://img.shields.io/badge/Release-v1.1.0-success.svg)](CHANGELOG.md)
+[![Status](https://img.shields.io/badge/Release-v1.4.0-success.svg)](CHANGELOG.md)
 
-> **Status:** Version 1.1.0. See the [release notes](CHANGELOG.md#110---2026-11-18) for this update.
+> **Status:** Version 1.4.0. Featuring Autonomous Quota Failover (429 Auto-Handoff), Cryptographic Audit Signing (ADR-010), Cost Accounting & Token Budgets (F6), Continuous Session Task Queue (F11), Linux Landlock Sandboxing (F4), Dynamic Subprocess Plugins (F5), and Webhook Triggers (F8). See the [release notes](CHANGELOG.md) for details.
 
 ---
 
@@ -91,6 +91,43 @@ AgentControll solves this by operating as a unified local supervisor: it pools a
 
 - **Instant Launch via npm / NPX (Recommended):** Run directly with zero compilation via `npx agentcontroll` or install globally with `npm install -g agentcontroll`. Verified prebuilt binaries are automatically fetched and cached for your platform.
 
+- **Autonomous Quota Failover & 429 Auto-Handoff (New in v1.4.0):**
+  - **Zero-Touch Rate Limit Recovery:** Automatically detects HTTP 429 errors, quota exhaustion, and rate limit signals across Claude Code (NDJSON streams), Subprocess Plugins, and Antigravity PTY sessions.
+  - **Timed Cooldown & Rotation:** Automatically places exhausted accounts into `Cooldown` (timed backoff) or `Exhausted` state with SQLite persistence, while an automated background sweeper restores them to `Active` once timers expire.
+  - **Automated Successor Handoff:** Identifies the backup account of the same provider with the lowest active session load, captures the task snapshot and active prompt, gracefully tears down the predecessor, and spawns the successor in the exact same workspace directory without human intervention.
+  - **Provider-Safe Isolation:** Canonical provider matching ensures Anthropic sessions fail over only to compatible Anthropic accounts and Antigravity sessions fail over only to Antigravity accounts.
+
+- **Cryptographic Audit Log Signing (ADR-010 / F7):**
+  - **Tamper-Evident Hash Chaining:** Every state transition, tool execution, and session event is appended to an SQLite schema v2 ledger with canonical SHA-256 hash chaining: `SHA-256(prev_hash || seq || timestamp || type || payload)`.
+  - **Genesis Hash Anchoring:** Chain anchored to canonical 64-zero genesis hash. Any database tampering, row deletion, payload alteration, or sequence gap is detected immediately.
+  - **Offline & Online Audit Verification:** Run `ac audit verify` (`--json`, `--plain`, `--offline`) to verify the mathematical integrity of the full audit log across all sessions.
+
+- **Cost Accounting & Spending Budgets (F6):**
+  - **Token Usage Engine:** Ingests input tokens, output tokens, cache read tokens, and cache write tokens emitted by Claude, Antigravity, and plugin agents.
+  - **Multi-Provider Pricing Engine:** Built-in pricing tables across Claude (Opus, Sonnet, Haiku), Gemini (Flash, Pro), and GPT-4o with fallback rates, tracking cumulative expenditures in `cost.db`.
+  - **Spending Budgets:** Configure daily and per-session hard/soft budget limits via `ac budget set`. Warns at 80% threshold and halts execution at 100% budget cap to prevent accidental runaway cloud billing. Inspect expenditures with `ac cost`.
+
+- **Continuous Session Task Backlog Queue (F11):**
+  - **Autonomous Task Scheduling:** Enqueue background tasks with priority levels (`critical`, `high`, `normal`, `low`) and FIFO resolution in a persistent `queue.db`.
+  - **Autonomous Successor Chaining:** When a running agent completes or terminates, the task queue scheduler automatically dequeues the next highest-priority task and spawns a successor session in the target project workspace.
+  - **Full Queue Management:** Enqueue, inspect, and cancel backlog items interactively or via CLI with `ac queue add`, `ac queue list`, and `ac queue cancel`.
+
+- **Kernel-Enforced Filesystem Sandboxing via Linux Landlock (F4):**
+  - **Unprivileged Kernel Confinement:** Employs Linux Landlock LSM to restrict agent processes and dynamic plugins strictly to their assigned workspace and isolated account profile directory. Out-of-boundary file mutations or reads are blocked at the Linux kernel syscall layer without requiring root or containers.
+
+- **Dynamic Subprocess Adapter Plugins (ADR-008 / F5):**
+  - **Extensible Agent Ecosystem:** Connect arbitrary external CLI agents (e.g. Devin CLI, Cognition, custom internal AI binaries) via declarative `[[plugins]]` in `config.toml`. Supports NDJSON protocol, stdin steering, environment variable isolation, and automatic signal handling.
+
+- **Webhook & External Notification Triggers (F8):**
+  - **Real-Time Webhook Dispatch:** Emits HTTP webhooks on agent questions, approval requests, task completions, crashes, rate limits, and budget thresholds.
+  - **Cryptographic Request Signing:** Includes `X-AgentControl-Signature` HMAC-SHA256 headers for webhook authenticity verification. Test notifications on the fly via `ac notification test`.
+
+- **Native Prometheus & OpenTelemetry Metrics (F12):**
+  - Embedded HTTP metrics server serving `/metrics` (Prometheus text format) and OpenTelemetry-compatible telemetry for active sessions, event append rates, system resource utilization, and memory usage.
+
+- **Reusable Session Presets & Templates (F10):**
+  - Define reusable task blueprints (`ac template`) with pre-configured task descriptions, execution modes, permission boundaries, models, and workspace directories. Launch in a single step with `ac template run <name>`.
+
 - **Full-Screen Virtual ANSI & TrueColor Terminal (`TerminalBuffer`):**
   - Dedicated virtual terminal buffer (`crates/ac-tui/src/terminal_buffer.rs`) with 256-color, 24-bit TrueColor (RGB), scrollback history, and alternate screen (`1049h`/`1049l`) emulation.
   - **Distraction-Free Full Screen (`Ctrl+F`):** Instantly maximizes the terminal to 100% edge-to-edge screen space with no headers or footers; pressing `Ctrl+F` again restores the normal layout.
@@ -154,16 +191,32 @@ agentcontroll
 
 #### Available CLI Commands & Aliases
 
-Installing `agentcontroll` globally provides four CLI entry points in your environment:
+Installing `agentcontroll` globally provides four primary CLI entry points in your environment:
 
 | Command | Purpose |
 |:---|:---|
 | `agentcontroll` | Primary interactive terminal UI dashboard and supervisor launcher. |
 | `agent-control` | Backward-compatible alias for `agentcontroll`. |
 | `agentcontrold` | Background supervisor daemon service (runs headless or as a system service). |
-| `ac` | Universal agent control plane CLI (sessions, projects, and daemon IPC; supports `--json` and `--plain` / `-p` for shell scripts). |
+| `ac` | Universal agent control plane CLI (sessions, accounts, projects, daemon IPC; supports `--json` and `--plain` / `-p` for shell scripts). |
 | `agentcontroll doctor` | Run automated, non-destructive health and account isolation diagnostics (`--deep`, `--json`). |
 | `ac doctor` | Direct doctor command invocation via the `ac` CLI tool. |
+
+#### Power-User Subcommands (`ac`)
+
+| Subcommand | Functionality |
+|:---|:---|
+| `ac session` | Create, start, pause, resume, steer, stop, and inspect agent sessions. |
+| `ac account` | Register, list, disable, enable, and inspect provider account rotation pools. |
+| `ac project` | Register repositories with shared or worktree-per-session workspace policies. |
+| `ac template` | Create, list, inspect, and run reusable session presets and task blueprints. |
+| `ac queue` | Manage the continuous session task backlog (`add`, `list`, `cancel`). |
+| `ac cost` | Inspect token usage and financial expenditures across sessions and models. |
+| `ac budget` | Inspect and configure daily and per-session spending budget limits. |
+| `ac audit verify` | Cryptographically verify SHA-256 hash-chain integrity of the SQLite audit log. |
+| `ac notification` | Inspect notification status and send test webhook alerts. |
+| `ac metrics` | Query real-time daemon Prometheus and OpenTelemetry performance metrics. |
+| `ac events` | Inspect and stream the append-only daemon event ledger. |
 
 Antigravity accounts are added, switched, and removed from the AgentControll
 TUI. The external `agy` CLI must already be installed separately for
@@ -262,8 +315,9 @@ AgentControll provides precompiled native release binaries for the following tar
 
 | Agent | Adapter | Protocol / Transport | Capabilities |
 |:---|:---|:---|:---|
-| **Google Antigravity (`agy`)** | `PtyAdapter` | Native PTY with Profile Isolation | Multi-account OAuth PKCE, login-link handoff, execution modes (`accept-edits`, `plan`), model flags, permission bypass. |
-| **Claude Code** | `ClaudeAdapter` | Structured NDJSON / PTY fallback | `--output-format stream-json`, tool approvals, rate-limit back-off, terminal interaction. |
+| **Google Antigravity (`agy`)** | `PtyAdapter` | Native PTY with Profile Isolation | Multi-account OAuth PKCE, login-link handoff, execution modes (`accept-edits`, `plan`), model flags, permission bypass, autonomous 429 quota failover. |
+| **Claude Code** | `ClaudeAdapter` | Structured NDJSON / PTY fallback | `--output-format stream-json`, tool approvals, token accounting, rate-limit back-off, autonomous 429 failover, terminal interaction. |
+| **Dynamic Subprocess Plugins (Devin CLI, Cognition, Custom)** | `SubprocessAdapter` | Child Process Pipes / NDJSON | Declarative plugin configuration, Landlock filesystem isolation, ambient credential stripping, autonomous failover. |
 | **Generic CLI Agent** | `PtyAdapter` | Pseudo-Terminal (`portable-pty`) | Regex pattern matching for prompts; POSIX signal controls (`SIGSTOP`, `SIGCONT`, `SIGTERM`, `SIGKILL`). |
 | **Codex / Devin CLI** | `PtyAdapter` | Pseudo-Terminal | Interactive session supervision, ANSI terminal streaming, and workspace binding. |
 | **Interactive Shells (`shell`, `bash`, `zsh`)** | `PtyAdapter` | Native Shell PTY | Launch arbitrary bash/zsh shell sessions under supervision with split-pane support and session history. |
@@ -573,6 +627,12 @@ AgentControll maintains an extensive test suite covering unit logic, integration
 # Run all workspace unit and integration tests
 cargo test --workspace
 
+# Run real-world zero-mock end-to-end tests (real processes, Landlock sandboxing, real 429 failover)
+cargo test -p ac-cli --test real_world_failover_e2e_tests -- --nocapture --test-threads=1
+
+# Run v1.3.0 4-tier end-to-end suite (audit signing, cost budgets, continuous task queue)
+cargo test -p ac-cli --test v130_e2e_tests
+
 # Run Antigravity hardening tests (fake binary E2E)
 cargo test -p ac-cli --test agy_hardening_tests
 
@@ -587,10 +647,11 @@ For test principles and categories, see [docs/TESTING.md](docs/TESTING.md).
 ## Roadmap
 
 - [x] **v1.0.0 Core Platform:** Complete supervisor daemon, SQLite event store, PTY terminal emulation, and multi-account hand-off.
-- [ ] **v1.1.0 Presets & Claude Sandbox:** Reusable session presets, Claude Code multi-account profile isolation, and OpenTelemetry metrics export.
-- [ ] **v1.2.0 Linux Sandboxing:** Kernel-enforced filesystem sandboxing via Linux Landlock / bubblewrap, and webhook notification triggers.
-- [ ] **v1.3.0 Windows Native Support:** Abstract POSIX domain sockets and process signals for native Windows execution.
-- [ ] **v2.0.0 Distributed Clusters:** Remote agent execution over encrypted mTLS tunnels and localhost web companion.
+- [x] **v1.1.0 Presets, Claude Sandbox & OTel:** Reusable session presets (F10), Claude Code multi-account profile isolation (ADR-014), and OpenTelemetry metrics export (F12).
+- [x] **v1.2.0 Linux Sandboxing, Dynamic Plugins & Webhooks:** Kernel-enforced filesystem sandboxing via Linux Landlock (F4), dynamic subprocess adapter plugins (F5 / ADR-008), and webhook notification triggers (F8).
+- [x] **v1.3.0 Cryptographic Auditing, Cost Engine & Task Queue:** Tamper-evident cryptographic audit log signing (ADR-010 / F7), token cost accounting and spending budgets (F6), and continuous session task queue (F11).
+- [x] **v1.4.0 Autonomous Quota Failover:** Automatic 429 & quota error detection, timed cooldown sweeper, lowest-load backup rotation, and uninterrupted successor handoff without mock data.
+- [ ] **v2.0.0 Distributed Clusters & Web Console:** Remote agent execution over encrypted mTLS tunnels (F1), Multi-User RBAC (F2), Web Console Companion (F3), and AgentMesh multi-agent coordination (F9).
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for the complete roadmap.
 

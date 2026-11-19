@@ -2,7 +2,7 @@
 
 **Local-first control plane for coding agents (Antigravity, Claude Code, Codex, Devin CLI)**
 
-`agentcontroll` manages, sandboxes, switches between, and monitors autonomous coding agents inside full-fidelity terminal sessions with hardware-isolated account profiles and zero-configuration launch flows.
+`agentcontroll` manages, sandboxes, switches between, and monitors autonomous coding agents inside full-fidelity terminal sessions with hardware-isolated account profiles, kernel-enforced Landlock sandboxing, cryptographic audit log signing, token budget tracking, priority task queuing, autonomous 429 quota failover, and zero-configuration launch flows.
 
 ## Quick Start
 
@@ -21,20 +21,15 @@ agentcontroll
 
 On first execution, the runner detects your host operating system and CPU architecture, downloads the matching prebuilt release binary, and invokes the terminal interface with transparent signal and stdio forwarding.
 
-## Built-in Virtual Terminal Emulator
+## Key Capabilities
 
-AgentControll features a built-in virtual terminal engine (`TerminalBuffer`) specifically optimized for interactive AI agent workflows:
-
-- **Full-Fidelity PTY Emulation:** ANSI 16-color, 256-color, 24-bit TrueColor, alternate screen (`1049h`/`1049l`), and stream-safe UTF-8 multi-byte decoding (preserving complex Unicode, Braille spinners, and emojis).
-- **Distraction-Free Full Screen (`Ctrl+F`):** Instantly maximizes the terminal to 100% of the display area with zero headers or footers; pressing `Ctrl+F` again restores the normal layout.
-- **Non-Destructive Cursor Navigation:** Full arrow key (`Left`, `Right`, `Up`, `Down`, `Home`, `End`) navigation without erasing, deleting, or corrupting input characters.
-- **Mouse Selection & Autoscroll:** Click and drag to highlight and select text, double-click for words, triple-click for lines, with automatic edge scrolling when dragging beyond viewport boundaries.
-- **Scrollback Regex Search (`/`):** Instant search modal across all historical lines with live match highlighting and `n` / `N` cycling.
-- **Interactive URL Picker (`o`):** Automatically extracts web links and OSC 8 hyperlinks into a searchable menu to open (`Enter`) or copy (`c`).
-- **Visual Mode (`v`) & OSC 52 Clipboard:** Keyboard-driven visual text selection and yank (`y`) to system clipboard, plus native handling of OSC 52 ANSI clipboard escapes.
-- **Customizable Keybindings:** Remap any supervisor hotkey interactively via Settings (`6`) or `~/.config/agentcontrol/settings.json`.
-- **Multi-Line Prompt History:** Recalls multi-line prompt drafts as atomic units.
-- **Transparent Signal Passing:** `Esc` is forwarded directly to the child agent (for vi, nano, fzf, CLI prompts), while `Ctrl+]` or `Ctrl+Q` safely detaches back to the supervisor dashboard.
+- **Autonomous Quota Failover (429 Auto-Handoff):** Detects 429 rate limits and quota exhaustion across Claude Code, Subprocess Plugins, and Antigravity PTY sessions. Places exhausted accounts into timed cooldown and automatically hands off to the lowest-load backup account without human intervention.
+- **Cryptographic Audit Log Signing (ADR-010):** Canonical SHA-256 hash chaining on all events stored in SQLite v2 (`ac audit verify`).
+- **Cost Accounting & Spending Budgets (F6):** Token usage tracking and multi-provider pricing engine with hard/soft budget enforcement (`ac cost`, `ac budget`).
+- **Continuous Session Task Backlog Queue (F11):** Persistent task backlog queue in `queue.db` with priority scheduling and autonomous successor chaining (`ac queue`).
+- **Kernel-Enforced Filesystem Sandboxing (F4):** Unprivileged Linux Landlock filesystem confinement restricting agents strictly to their assigned workspace.
+- **Dynamic Subprocess Adapter Plugins (ADR-008):** Declarative TOML plugin support for arbitrary CLI agents (e.g. Devin CLI, Cognition, custom tools).
+- **Built-in Virtual Terminal Emulator (`TerminalBuffer`):** TrueColor ANSI rendering, distraction-free fullscreen (`Ctrl+F`), non-destructive cursor navigation, mouse drag selection, regex scrollback search (`/`), URL picker (`o`), visual mode (`v`), and OSC 52 clipboard sync.
 
 ## Commands
 
@@ -46,6 +41,25 @@ agentcontroll
 
 # Shorthand alias
 ac
+
+# Session management
+ac session list
+ac session create --task "Fix bug" --agent-type claude
+
+# Continuous task backlog queue
+ac queue add --title "Refactor module" --priority high
+ac queue list
+
+# Cost accounting & spending budgets
+ac cost
+ac budget set daily 25.00
+
+# Cryptographic audit log verification
+ac audit verify
+
+# Reusable session templates
+ac template list
+ac template run default
 
 # Diagnose installation health, credentials, and account switching isolation
 agentcontroll doctor
